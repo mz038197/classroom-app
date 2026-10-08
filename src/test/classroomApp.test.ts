@@ -28,12 +28,14 @@ function harness(
     files?: Record<string, string | undefined>;
     run?: (cwd: string, command: string) => Promise<string>;
     write?: (path: string, contents: string) => Promise<void>;
+    sessionModels?: (apiKey: string) => Promise<string[]>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
   const catalogKeys: string[] = [];
   const fileReads: string[] = [];
   const runCalls: { cwd: string; command: string }[] = [];
+  const modelKeys: string[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
   let clipboardWrites = 0;
@@ -51,6 +53,13 @@ function harness(
           api_key: KEY,
           session: resolvedSession,
         };
+      },
+      async fetchSessionModels(apiKey: string) {
+        modelKeys.push(apiKey);
+        if (options?.sessionModels) {
+          return options.sessionModels(apiKey);
+        }
+        return ["second-looking-but-first", "later"];
       },
     },
     catalog: {
@@ -117,6 +126,7 @@ function harness(
   return {
     app,
     redeemCalls,
+    modelKeys,
     clipboard: () => clipboard,
     clipboardWrites: () => clipboardWrites,
     storedKey: () => storedKey,
@@ -132,18 +142,20 @@ function harness(
 
 describe("Classroom App redeem", () => {
   it("does not redeem when the invite code is blank after trim", async () => {
-    const { app, redeemCalls } = harness();
+    const { app, redeemCalls, modelKeys } = harness();
     await app.redeem("   ", "Ada");
     assert.equal(redeemCalls.length, 0);
+    assert.deepEqual(modelKeys, []);
     assert.equal(app.view().connected, false);
     assert.equal(app.view().canCopyKey, false);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 
   it("does not redeem when the nickname is blank after trim", async () => {
-    const { app, redeemCalls } = harness();
+    const { app, redeemCalls, modelKeys } = harness();
     await app.redeem("ABC12345", " \n\t ");
     assert.equal(redeemCalls.length, 0);
+    assert.deepEqual(modelKeys, []);
     assert.equal(app.view().connected, false);
     assert.equal(app.view().canCopyKey, false);
   });
@@ -247,6 +259,137 @@ describe("Clear Classroom Connection", () => {
     assert.equal(clipboardWrites(), 1);
     assert.equal(app.view().canCopyKey, false);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("returns the switch to Native and drops the copy entry", async () => {
+    const { app, storedKey, clipboardWrites } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    await app.clearConnection();
+    const view = app.view();
+    assert.equal(view.mode, "native");
+    assert.equal(view.modelId, undefined);
+    assert.equal(view.canCopyKey, false);
+    assert.equal(view.classLabel, undefined);
+    assert.equal(view.notice, undefined);
+    assert.equal(storedKey(), undefined);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+    await app.copyKey();
+    assert.equal(clipboardWrites(), 0);
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "native");
+  });
+});
+
+describe("Model Switch", () => {
+  it("uses one mode for both Codex and Claude Code, selecting the first returned id", async () => {
+    const { app, modelKeys } = harness();
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(app.view().mode, "native");
+    assert.deepEqual(modelKeys, [KEY]);
+    await app.setSwitch("classroom");
+    assert.deepEqual(modelKeys, [KEY]);
+    const view = app.view();
+    assert.equal(view.mode, "classroom");
+    assert.equal(view.modelId, "second-looking-but-first");
+    assert.equal("codex" in view, false);
+    assert.equal("claude" in view, false);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("stays Native when the allowlist is explicitly empty", async () => {
+    const { app, modelKeys } = harness(undefined, {
+      async sessionModels() {
+        return [];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().modelId, undefined);
+    assert.deepEqual(modelKeys, [KEY]);
+  });
+
+  it("stays Native when there is no Classroom API Key", async () => {
+    const { app, modelKeys } = harness();
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().modelId, undefined);
+    assert.deepEqual(modelKeys, []);
+  });
+
+  it("returns to Native when the new session allowlist is explicitly empty", async () => {
+    let call = 0;
+    const { app } = harness(undefined, {
+      async sessionModels() {
+        call += 1;
+        if (call === 1) {
+          return ["second-looking-but-first", "later"];
+        }
+        return [];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().modelId, undefined);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("replaces the selected id with the new session's first id", async () => {
+    let call = 0;
+    const { app } = harness(undefined, {
+      async sessionModels(apiKey) {
+        assert.equal(apiKey, KEY);
+        call += 1;
+        if (call === 1) {
+          return ["second-looking-but-first", "later"];
+        }
+        return ["fresh-session-first", "tail"];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(app.view().mode, "classroom");
+    assert.equal(app.view().modelId, "fresh-session-first");
+  });
+
+  it("keeps the previous Classroom id when reload throws", async () => {
+    let fail = false;
+    const { app } = harness(undefined, {
+      async sessionModels() {
+        if (fail) {
+          throw new Error("refetch failed, template-fallback-id");
+        }
+        return ["second-looking-but-first", "later"];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    fail = true;
+    await app.reloadAllowlist();
+    const view = app.view();
+    assert.equal(view.mode, "classroom");
+    assert.equal(view.modelId, "second-looking-but-first");
+    assert.equal(JSON.stringify(view).includes("template-fallback-id"), false);
+  });
+
+  it("does not keep a third-party base URL when returning to Native", async () => {
+    const { app } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    await app.setSwitch("native");
+    const view = app.view();
+    assert.equal(view.mode, "native");
+    assert.equal(view.modelId, undefined);
+    assert.equal(view.connected, true);
+    const serialized = JSON.stringify(view);
+    assert.equal(serialized.includes("openai_base_url"), false);
+    assert.equal(serialized.includes("ANTHROPIC_BASE_URL"), false);
+    assert.equal(serialized.includes("http"), false);
+    assert.equal(serialized.includes(KEY), false);
   });
 });
 
@@ -654,6 +797,10 @@ actions:
     app.prepare("first");
     const running = app.confirm();
     assert.equal(runCalls.length, 1);
+    assert.equal(app.view().commandRunning, true);
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "classroom");
+    assert.equal(app.view().modelId, "second-looking-but-first");
     assert.equal(app.view().commandRunning, true);
     await app.setProjectFolder("D:\\other");
     assert.equal(app.view().projectFolder, "D:\\lesson");

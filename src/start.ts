@@ -40,6 +40,48 @@ function createFileStorage(filePath: string) {
   };
 }
 
+function modelIdsInRouterOrder(payload: unknown): string[] {
+  if (!Array.isArray(payload)) {
+    throw new Error("模型清單格式錯誤");
+  }
+  const ids: string[] = [];
+  for (const provider of payload) {
+    if (!provider || typeof provider !== "object") {
+      continue;
+    }
+    const models = (provider as { models?: unknown }).models;
+    if (!Array.isArray(models)) {
+      continue;
+    }
+    for (const model of models) {
+      if (!model || typeof model !== "object") {
+        continue;
+      }
+      const id = (model as { id?: unknown }).id;
+      if (typeof id === "string" && id) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+async function fetchSessionModels(apiKey: string): Promise<string[]> {
+  const root = (
+    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
+  ).replace(/\/+$/, "");
+  const response = await fetch(`${root}/extension/chat-language-models`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error("session models failed");
+  }
+  return modelIdsInRouterOrder(await response.json());
+}
+
 function isRedeemResult(value: unknown): value is NicknameRedeemResult {
   if (!value || typeof value !== "object") {
     return false;
@@ -215,7 +257,7 @@ function openTray(url: string): ChildProcess {
 
 async function main(): Promise<void> {
   const app = new ClassroomApp({
-    router: { redeemNickname },
+    router: { redeemNickname, fetchSessionModels },
     catalog: { fetchCourseCatalog },
     projectFiles: { readClassroomInstalls },
     clipboard: { write: writeClipboard },
@@ -281,6 +323,20 @@ async function main(): Promise<void> {
       }
       if (req.method === "POST" && url === "/clear") {
         await app.clearConnection();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/switch") {
+        const params = new URLSearchParams(await readBody(req));
+        const mode = params.get("mode");
+        if (mode === "classroom" || mode === "native") {
+          await app.setSwitch(mode);
+        }
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/reload") {
+        await app.reloadAllowlist();
         redirect(res);
         return;
       }
