@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ClassroomApp } from "../classroomApp";
+import { ClassroomApp, type EnvironmentToolId } from "../classroomApp";
 
 const KEY = "vcr_sk_nick";
 
@@ -29,12 +29,19 @@ function harness(
     run?: (cwd: string, command: string) => Promise<string>;
     write?: (path: string, contents: string) => Promise<void>;
     sessionModels?: (apiKey: string) => Promise<string[]>;
+    probe?: (tool: EnvironmentToolId) => Promise<{ installed: boolean }>;
+    install?: (
+      tool: EnvironmentToolId,
+      cwd: string,
+    ) => Promise<{ exitCode: number | undefined; output: string }>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
   const catalogKeys: string[] = [];
   const fileReads: string[] = [];
   const runCalls: { cwd: string; command: string }[] = [];
+  const probeCalls: EnvironmentToolId[] = [];
+  const installCalls: { tool: EnvironmentToolId; cwd: string }[] = [];
   const modelKeys: string[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
@@ -119,6 +126,22 @@ function harness(
         await options?.write?.(path, contents);
       },
     },
+    environment: {
+      async probe(tool) {
+        probeCalls.push(tool);
+        if (options?.probe) {
+          return options.probe(tool);
+        }
+        return { installed: false };
+      },
+      async install(tool, cwd) {
+        installCalls.push({ tool, cwd });
+        if (options?.install) {
+          return options.install(tool, cwd);
+        }
+        return { exitCode: 0, output: "" };
+      },
+    },
     stopProcess() {
       stops += 1;
     },
@@ -134,6 +157,8 @@ function harness(
     catalogKeys,
     fileReads,
     runCalls,
+    probeCalls,
+    installCalls,
     failClipboard(error: Error) {
       clipboardError = error;
     },
@@ -842,6 +867,185 @@ actions:
     assert.deepEqual(runCalls, [{ cwd: "D:\\lesson", command }]);
     assert.deepEqual(writes, []);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+});
+
+describe("environment tools", () => {
+  it("lists uv, git, node, and pwsh, and does not count Windows PowerShell 5.1 as pwsh", async () => {
+    const asked: string[] = [];
+    const { app } = harness(undefined, {
+      async probe(tool) {
+        asked.push(tool);
+        if ((tool as string) === "powershell") {
+          return { installed: true };
+        }
+        return { installed: tool !== "pwsh" };
+      },
+    });
+    await app.checkEnvironment();
+    const view = app.view();
+    assert.deepEqual(
+      view.tools.map((tool) => tool.id),
+      ["uv", "git", "node", "pwsh"],
+    );
+    assert.equal(view.tools.length, 4);
+    assert.equal(view.tools.find((tool) => tool.id === "pwsh")?.installed, false);
+    assert.equal(JSON.stringify(view.tools).includes("powershell"), false);
+    assert.deepEqual(asked, ["uv", "git", "node", "pwsh"]);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("installs a subset in list order inside the Project Folder after one confirm", async () => {
+    const { app, installCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    app.selectEnvironment(["node", "uv"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(installCalls, [
+      { tool: "uv", cwd: "D:\\lesson" },
+      { tool: "node", cwd: "D:\\lesson" },
+    ]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("stops after a real install failure and does not install later tools", async () => {
+    const { app, installCalls } = harness(undefined, {
+      async install(tool) {
+        if (tool === "git") {
+          return { exitCode: 1, output: "boom" };
+        }
+        return { exitCode: 0, output: "" };
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    app.selectEnvironment(["pwsh", "git", "uv"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(
+      installCalls.map((call) => call.tool),
+      ["uv", "git"],
+    );
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not install when the selection is empty", async () => {
+    const { app, installCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    app.selectEnvironment([]);
+    await app.confirmEnvironment();
+    assert.deepEqual(installCalls, []);
+  });
+
+  it("does not install without a Project Folder", async () => {
+    const { app, installCalls } = harness();
+    app.selectEnvironment(["uv", "git", "node", "pwsh"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(installCalls, []);
+    assert.equal(app.view().projectFolder, undefined);
+  });
+
+  it("holds the command lock while an install is pending", async () => {
+    let release: (value: { exitCode: number | undefined; output: string }) => void =
+      () => {};
+    const gate = new Promise<{ exitCode: number | undefined; output: string }>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
+    const { app, runCalls, fileReads } = harness(undefined, {
+      files: {
+        "D:\\other": `
+actions:
+  - id: other
+    title: Other
+    kind: skill
+    command: echo other
+`,
+      },
+      install: async () => gate,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.selectEnvironment(["uv"]);
+    const pending = app.confirmEnvironment();
+    assert.equal(app.view().commandRunning, true);
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(runCalls.length, 0);
+    await app.setProjectFolder("D:\\other");
+    assert.equal(app.view().projectFolder, "D:\\lesson");
+    assert.deepEqual(fileReads, []);
+    release({ exitCode: 0, output: "" });
+    await pending;
+    assert.equal(app.view().commandRunning, false);
+    assert.equal(app.view().projectFolder, "D:\\lesson");
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not start an install while a lesson command is running", async () => {
+    let release: (value: string) => void = () => {};
+    const gate = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { app, installCalls, runCalls } = harness(undefined, {
+      run: async () => gate,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    const running = app.confirm();
+    assert.equal(runCalls.length, 1);
+    app.selectEnvironment(["uv", "git"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(installCalls, []);
+    assert.equal(app.view().projectFolder, "D:\\lesson");
+    release("done\n");
+    await running;
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("asks the student to reopen the terminal after exit 0 and does not mark the tool ready", async () => {
+    const { app, probeCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.checkEnvironment();
+    const probesAfterCheck = probeCalls.length;
+    app.selectEnvironment(["uv"]);
+    await app.confirmEnvironment();
+    const view = app.view();
+    assert.equal(view.tools.find((tool) => tool.id === "uv")?.installed, false);
+    assert.equal(view.environmentNotice, "請重開終端機再重新檢查。");
+    assert.equal(probeCalls.length, probesAfterCheck);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("treats the official already-installed message as success and a bare boom as failure", async () => {
+    const { app, installCalls, probeCalls } = harness(undefined, {
+      async install(tool) {
+        if (tool === "git") {
+          return {
+            exitCode: 1,
+            output:
+              'xcode-select: error: command line tools are already installed, use "Software Update" to install updates\n',
+          };
+        }
+        if (tool === "node") {
+          return { exitCode: 1, output: "boom" };
+        }
+        return { exitCode: 0, output: "" };
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.checkEnvironment();
+    const probesAfterCheck = probeCalls.length;
+    app.selectEnvironment(["pwsh", "node", "git"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(
+      installCalls.map((call) => call.tool),
+      ["git", "node"],
+    );
+    const view = app.view();
+    assert.equal(view.tools.every((tool) => tool.installed === false), true);
+    assert.equal(view.environmentNotice, "請重開終端機再重新檢查。");
+    assert.equal(probeCalls.length, probesAfterCheck);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
   });
 });
 

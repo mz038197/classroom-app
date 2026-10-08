@@ -3,7 +3,11 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { ClassroomApp, type NicknameRedeemResult } from "./classroomApp";
+import {
+  ClassroomApp,
+  type EnvironmentToolId,
+  type NicknameRedeemResult,
+} from "./classroomApp";
 import { renderPage } from "./page";
 
 const port = 47821;
@@ -162,6 +166,74 @@ async function redeemNickname(body: {
   return json;
 }
 
+const ENVIRONMENT_TOOL_IDS: readonly EnvironmentToolId[] = [
+  "uv",
+  "git",
+  "node",
+  "pwsh",
+];
+
+function isEnvironmentTool(value: string): value is EnvironmentToolId {
+  return (ENVIRONMENT_TOOL_IDS as readonly string[]).includes(value);
+}
+
+function probeEnvironment(
+  tool: EnvironmentToolId,
+): Promise<{ installed: boolean }> {
+  return new Promise((resolve) => {
+    const child = spawn(tool, ["--version"], { windowsHide: true });
+    let output = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.on("error", () => resolve({ installed: false }));
+    child.on("close", (code) => {
+      resolve({ installed: code === 0 || /\d/.test(output) });
+    });
+  });
+}
+
+function installEnvironment(
+  tool: EnvironmentToolId,
+  cwd: string,
+): Promise<{ exitCode: number | undefined; output: string }> {
+  const command = environmentInstallCommand(tool);
+  return new Promise((resolve) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+      cwd,
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.on("error", () => resolve({ exitCode: 1, output: "安裝命令無法啟動。" }));
+    child.on("close", (code) => {
+      resolve({
+        exitCode: code === null ? undefined : code,
+        output: Buffer.concat(chunks).toString("utf8"),
+      });
+    });
+  });
+}
+
+function environmentInstallCommand(tool: EnvironmentToolId): string {
+  const quiet =
+    "--source winget --disable-interactivity -h --accept-package-agreements --accept-source-agreements";
+  if (tool === "uv") {
+    return 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"';
+  }
+  if (tool === "git") {
+    return `winget install --id Git.Git -e ${quiet}`;
+  }
+  if (tool === "node") {
+    return `winget install --id OpenJS.NodeJS.LTS -e ${quiet}`;
+  }
+  return `winget install --id Microsoft.PowerShell -e ${quiet}`;
+}
+
 function runCommand(cwd: string, command: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
@@ -262,6 +334,10 @@ async function main(): Promise<void> {
     projectFiles: { readClassroomInstalls },
     clipboard: { write: writeClipboard },
     commands: { run: runCommand },
+    environment: {
+      probe: probeEnvironment,
+      install: installEnvironment,
+    },
     files: {
       async write() {
         throw new Error("Classroom App 不寫 MCP 設定");
@@ -313,6 +389,21 @@ async function main(): Promise<void> {
       }
       if (req.method === "POST" && url === "/cancel") {
         app.cancel();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/environment-check") {
+        await app.checkEnvironment();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/environment") {
+        const params = new URLSearchParams(await readBody(req));
+        const tools = params
+          .getAll("tool")
+          .filter((value): value is EnvironmentToolId => isEnvironmentTool(value));
+        app.selectEnvironment(tools);
+        await app.confirmEnvironment();
         redirect(res);
         return;
       }
