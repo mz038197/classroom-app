@@ -5,9 +5,20 @@ import os from "node:os";
 import path from "node:path";
 import { ClassroomApp, type NicknameRedeemResult } from "./classroomApp";
 import { renderPage } from "./page";
+import { createRouteFiles } from "./routeFiles";
 
 const port = 47821;
 const pageUrl = `http://127.0.0.1:${port}/`;
+
+function routePaths() {
+  const appData =
+    process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  return {
+    codex: path.join(os.homedir(), ".codex", "config.toml"),
+    claude: path.join(os.homedir(), ".claude", "settings.json"),
+    vsCode: path.join(appData, "Code", "User", "settings.json"),
+  };
+}
 
 function storageFile(): string {
   const root = process.env.LOCALAPPDATA || os.homedir();
@@ -249,9 +260,18 @@ async function main(): Promise<void> {
     clipboard: { write: writeClipboard },
     storage: createFileStorage(storageFile()),
     stopProcess() {
-      // 關視窗不呼叫這裡。之後的停止票才會停代理。
+      // 關視窗不呼叫這裡。停止是頁面上的單獨動作。
+    },
+    proxyBaseUrl: pageUrl.replace(/\/$/, ""),
+    routes: createRouteFiles(routePaths()),
+    proxy: {
+      start() {
+        // 這個行程的 127.0.0.1:47821 就是路由位址。轉送請求留給之後的票。
+      },
+      stop() {},
     },
   });
+  await app.start();
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -301,6 +321,11 @@ async function main(): Promise<void> {
       }
       if (req.method === "POST" && url === "/reload") {
         await app.reloadAllowlist();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/stop") {
+        await app.stop();
         redirect(res);
         return;
       }

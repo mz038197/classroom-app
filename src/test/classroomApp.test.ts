@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { ClassroomApp } from "../classroomApp";
 
 const KEY = "vcr_sk_nick";
+const PROXY = "http://127.0.0.1:47821";
 
 const REMOTE_YAML = `
 actions:
@@ -27,6 +28,9 @@ function harness(
     catalogError?: Error;
     files?: Record<string, string | undefined>;
     sessionModels?: (apiKey: string) => Promise<string[]>;
+    codex?: Record<string, unknown>;
+    claudeTerminal?: Record<string, unknown>;
+    vsCode?: Record<string, unknown>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
@@ -38,6 +42,14 @@ function harness(
   let clipboardWrites = 0;
   let clipboardError: Error | undefined;
   let stops = 0;
+  let proxyStops = 0;
+  let proxyStarts = 0;
+  const docs = {
+    codex: { ...(options?.codex ?? {}) },
+    claudeTerminal: { ...(options?.claudeTerminal ?? {}) },
+    vsCode: { ...(options?.vsCode ?? {}) },
+  };
+  const routeWrites = { codex: 0, claudeTerminal: 0, vsCode: 0 };
   const resolvedSession = session ?? { class_name: "Demo", name: "Week 1" };
   const app = new ClassroomApp({
     router: {
@@ -105,6 +117,38 @@ function harness(
     stopProcess() {
       stops += 1;
     },
+    proxyBaseUrl: PROXY,
+    routes: {
+      async readCodex() {
+        return docs.codex;
+      },
+      async writeCodex(doc) {
+        routeWrites.codex += 1;
+        docs.codex = doc;
+      },
+      async readClaudeTerminal() {
+        return docs.claudeTerminal;
+      },
+      async writeClaudeTerminal(doc) {
+        routeWrites.claudeTerminal += 1;
+        docs.claudeTerminal = doc;
+      },
+      async readVsCodeClaude() {
+        return docs.vsCode;
+      },
+      async writeVsCodeClaude(doc) {
+        routeWrites.vsCode += 1;
+        docs.vsCode = doc;
+      },
+    },
+    proxy: {
+      start() {
+        proxyStarts += 1;
+      },
+      stop() {
+        proxyStops += 1;
+      },
+    },
   });
   return {
     app,
@@ -114,6 +158,10 @@ function harness(
     clipboardWrites: () => clipboardWrites,
     storedKey: () => storedKey,
     stops: () => stops,
+    proxyStops: () => proxyStops,
+    proxyStarts: () => proxyStarts,
+    docs,
+    routeWrites,
     catalogKeys,
     fileReads,
     failClipboard(error: Error) {
@@ -666,6 +714,197 @@ actions:
   });
 });
 
+describe("route addresses", () => {
+  it("points Codex openai_base_url at the proxy and keeps trust and mcp", async () => {
+    const { app, docs } = harness(undefined, {
+      codex: { trust: "always", mcp: { server: "local" }, model: "kept" },
+    });
+    await app.start();
+    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.trust, "always");
+    assert.deepEqual(docs.codex.mcp, { server: "local" });
+    assert.equal(docs.codex.model, "kept");
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("points both Claude ANTHROPIC_BASE_URL fields at the proxy and leaves API key fields alone", async () => {
+    const { app, docs } = harness(undefined, {
+      claudeTerminal: {
+        ANTHROPIC_API_KEY: "sk-ant-keep",
+        apiKey: "keep-api",
+        CUSTOM_API_KEY: "keep-custom",
+        theme: "dark",
+      },
+      vsCode: {
+        "claudeCode.environmentVariables": [
+          { name: "ANTHROPIC_API_KEY", value: "sk-ant-keep" },
+          { name: "OTHER", value: "stay" },
+        ],
+        apiKey: "keep-api",
+        EDITOR_API_KEY: "keep-editor",
+      },
+    });
+    await app.start();
+    assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);
+    assert.equal(docs.claudeTerminal.ANTHROPIC_API_KEY, "sk-ant-keep");
+    assert.equal(docs.claudeTerminal.apiKey, "keep-api");
+    assert.equal(docs.claudeTerminal.CUSTOM_API_KEY, "keep-custom");
+    assert.equal(docs.claudeTerminal.theme, "dark");
+    assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], [
+      { name: "ANTHROPIC_API_KEY", value: "sk-ant-keep" },
+      { name: "OTHER", value: "stay" },
+      { name: "ANTHROPIC_BASE_URL", value: PROXY },
+    ]);
+    assert.equal(docs.vsCode.apiKey, "keep-api");
+    assert.equal(docs.vsCode.EDITOR_API_KEY, "keep-editor");
+    assert.equal(Object.hasOwn(docs.claudeTerminal, "ANTHROPIC_AUTH_TOKEN"), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+    assert.equal(JSON.stringify(docs).includes("sk-ant-keep"), true);
+  });
+
+  it("keeps other VS Code environment map entries when setting ANTHROPIC_BASE_URL", async () => {
+    const { app, docs } = harness(undefined, {
+      vsCode: {
+        "claudeCode.environmentVariables": {
+          OTHER: "stay",
+          ANTHROPIC_API_KEY: "sk-ant-keep",
+        },
+        "editor.fontSize": 14,
+      },
+    });
+    await app.start();
+    assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], {
+      OTHER: "stay",
+      ANTHROPIC_API_KEY: "sk-ant-keep",
+      ANTHROPIC_BASE_URL: PROXY,
+    });
+    assert.equal(docs.vsCode["editor.fontSize"], 14);
+  });
+
+  it("names the previous host and leaves the key out of the view", async () => {
+    const previous = "https://user:secret@old.example/v1?key=vcr_sk_secret";
+    const { app, docs } = harness(undefined, {
+      codex: { openai_base_url: previous, trust: "always" },
+    });
+    await app.start();
+    const notice = app.view().notice ?? "";
+    assert.equal(notice.includes("old.example"), true);
+    assert.equal(notice.includes("secret"), false);
+    assert.equal(notice.includes("vcr_sk"), false);
+    assert.equal(notice.includes("user:"), false);
+    const viewText = JSON.stringify(app.view());
+    assert.equal(viewText.includes("secret"), false);
+    assert.equal(viewText.includes("vcr_sk"), false);
+    assert.equal(viewText.includes(KEY), false);
+    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.trust, "always");
+  });
+
+  it("asks the student to fully quit Codex and Claude Code the first time a route is written", async () => {
+    const { app } = harness();
+    await app.start();
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude"]);
+    assert.equal(JSON.stringify(app.view()).includes("vscode"), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("changes only upstream mode and modelId while the proxy is running", async () => {
+    const { app, routeWrites } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    const writes = { ...routeWrites };
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "classroom");
+    assert.equal(app.view().modelId, "second-looking-but-first");
+    await app.setSwitch("native");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().modelId, undefined);
+    assert.deepEqual(routeWrites, writes);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("removes the route overrides when the proxy stops and does not restore the old address", async () => {
+    const previous = "https://user:secret@old.example/v1?key=vcr_sk_secret";
+    const { app, docs, proxyStops } = harness(undefined, {
+      codex: {
+        openai_base_url: previous,
+        trust: "always",
+        mcp: { server: "local" },
+      },
+      claudeTerminal: {
+        ANTHROPIC_BASE_URL: "https://claude.example",
+        theme: "dark",
+        ANTHROPIC_API_KEY: "sk-ant-keep",
+      },
+      vsCode: {
+        "claudeCode.environmentVariables": [
+          { name: "OTHER", value: "stay" },
+          { name: "ANTHROPIC_BASE_URL", value: "https://claude.example" },
+        ],
+        "editor.fontSize": 14,
+      },
+    });
+    await app.start();
+    await app.stop();
+    assert.equal(proxyStops(), 1);
+    assert.equal(Object.hasOwn(docs.codex, "openai_base_url"), false);
+    assert.equal(docs.codex.trust, "always");
+    assert.deepEqual(docs.codex.mcp, { server: "local" });
+    assert.equal(Object.hasOwn(docs.claudeTerminal, "ANTHROPIC_BASE_URL"), false);
+    assert.equal(docs.claudeTerminal.theme, "dark");
+    assert.equal(docs.claudeTerminal.ANTHROPIC_API_KEY, "sk-ant-keep");
+    assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], [
+      { name: "OTHER", value: "stay" },
+    ]);
+    assert.equal(docs.vsCode["editor.fontSize"], 14);
+    const written = JSON.stringify(docs);
+    assert.equal(written.includes(previous), false);
+    assert.equal(written.includes("old.example"), false);
+    assert.equal(written.includes("claude.example"), false);
+    assert.equal(written.includes("secret"), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("points the routes at the proxy again after stop and keeps the stored switch", async () => {
+    const { app, docs, proxyStarts, proxyStops } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.setSwitch("classroom");
+    await app.start();
+    await app.stop();
+    await app.start();
+    assert.equal(proxyStops(), 1);
+    assert.equal(proxyStarts(), 2);
+    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);
+    assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], [
+      { name: "ANTHROPIC_BASE_URL", value: PROXY },
+    ]);
+    assert.equal(app.view().mode, "classroom");
+    assert.equal(app.view().modelId, "second-looking-but-first");
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude"]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("drops ANTHROPIC_BASE_URL from a VS Code environment map and keeps the other entries", async () => {
+    const { app, docs } = harness(undefined, {
+      vsCode: {
+        "claudeCode.environmentVariables": {
+          OTHER: "stay",
+          ANTHROPIC_BASE_URL: "https://claude.example",
+          ANTHROPIC_API_KEY: "sk-ant-keep",
+        },
+      },
+    });
+    await app.start();
+    await app.stop();
+    assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], {
+      OTHER: "stay",
+      ANTHROPIC_API_KEY: "sk-ant-keep",
+    });
+    assert.equal(JSON.stringify(docs).includes("claude.example"), false);
+  });
+});
+
 describe("close window", () => {
   it("does not stop the process", async () => {
     const { app, stops, storedKey, clipboardWrites } = harness();
@@ -679,5 +918,24 @@ describe("close window", () => {
     await app.copyKey();
     assert.equal(clipboardWrites(), 1);
     assert.equal(stops(), 0);
+  });
+
+  it("does not stop the proxy or change routes", async () => {
+    const { app, docs, proxyStops, routeWrites } = harness(undefined, {
+      codex: { trust: "always", mcp: { server: "local" } },
+      claudeTerminal: { theme: "dark", ANTHROPIC_API_KEY: "sk-ant-keep" },
+    });
+    await app.start();
+    const writes = { ...routeWrites };
+    app.closeWindow();
+    assert.equal(proxyStops(), 0);
+    assert.deepEqual(routeWrites, writes);
+    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.trust, "always");
+    assert.deepEqual(docs.codex.mcp, { server: "local" });
+    assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);
+    assert.equal(docs.claudeTerminal.ANTHROPIC_API_KEY, "sk-ant-keep");
+    assert.equal(app.view().connected, false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 });

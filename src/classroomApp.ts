@@ -37,6 +37,19 @@ export type ClassroomAppDeps = {
     clearApiKey(): Promise<void>;
   };
   stopProcess(): void;
+  proxyBaseUrl: string;
+  routes: {
+    readCodex(): Promise<Record<string, unknown>>;
+    writeCodex(doc: Record<string, unknown>): Promise<void>;
+    readClaudeTerminal(): Promise<Record<string, unknown>>;
+    writeClaudeTerminal(doc: Record<string, unknown>): Promise<void>;
+    readVsCodeClaude(): Promise<Record<string, unknown>>;
+    writeVsCodeClaude(doc: Record<string, unknown>): Promise<void>;
+  };
+  proxy: {
+    start(): void;
+    stop(): void;
+  };
 };
 
 export type CourseActionView = {
@@ -74,6 +87,7 @@ export type ClassroomAppView = {
   catalogError?: string;
   mode: ModelSwitchMode;
   modelId?: string;
+  mustRestart?: Array<"codex" | "claude" | "vscode">;
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
@@ -90,6 +104,8 @@ export class ClassroomApp {
   private remoteCatalogHeld = false;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
+  private mustRestart: Array<"codex" | "claude" | "vscode"> | undefined;
+  private routeRestartNoted = false;
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -120,6 +136,9 @@ export class ClassroomApp {
     }
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
+    }
+    if (this.mustRestart) {
+      view.mustRestart = this.mustRestart;
     }
     return view;
   }
@@ -229,8 +248,46 @@ export class ClassroomApp {
     this.modelIds = [];
   }
 
+  async start(): Promise<void> {
+    const codex = await this.deps.routes.readCodex();
+    const claude = await this.deps.routes.readClaudeTerminal();
+    const vsCode = await this.deps.routes.readVsCodeClaude();
+    const url = this.deps.proxyBaseUrl;
+    const hosts = previousHosts(url, [
+      codex.openai_base_url,
+      claude.ANTHROPIC_BASE_URL,
+      ...anthropicBaseValues(vsCode[VS_CODE_ENV]),
+    ]);
+    await this.deps.routes.writeCodex({ ...codex, openai_base_url: url });
+    await this.deps.routes.writeClaudeTerminal({
+      ...claude,
+      ANTHROPIC_BASE_URL: url,
+    });
+    await this.deps.routes.writeVsCodeClaude(withVsCodeBaseUrl(vsCode, url));
+    this.deps.proxy.start();
+    if (hosts.length > 0) {
+      this.notice = `路由原先指向 ${hosts.join("、")}。`;
+    }
+    if (!this.routeRestartNoted) {
+      this.mustRestart = ["codex", "claude"];
+      this.routeRestartNoted = true;
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.deps.proxy.stop();
+    const codex = await this.deps.routes.readCodex();
+    const claude = await this.deps.routes.readClaudeTerminal();
+    const vsCode = await this.deps.routes.readVsCodeClaude();
+    await this.deps.routes.writeCodex(withoutKey(codex, "openai_base_url"));
+    await this.deps.routes.writeClaudeTerminal(
+      withoutKey(claude, "ANTHROPIC_BASE_URL"),
+    );
+    await this.deps.routes.writeVsCodeClaude(withoutVsCodeBaseUrl(vsCode));
+  }
+
   closeWindow(): void {
-    // 關分頁不停止本機行程。停止留給之後的票。
+    // 關分頁不停止代理，也不改路由。
   }
 
   private async loadCatalog(): Promise<void> {
@@ -294,6 +351,119 @@ export class ClassroomApp {
     this.catalog = catalogView(parsed.actions, parsed.snippets, "local");
     this.catalogError = undefined;
   }
+}
+
+const VS_CODE_ENV = "claudeCode.environmentVariables";
+
+function hostnameOf(value: string): string | undefined {
+  try {
+    const host = new URL(value).hostname;
+    return host || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameProxy(value: string, proxyBaseUrl: string): boolean {
+  try {
+    return new URL(value).origin === new URL(proxyBaseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function previousHosts(proxyBaseUrl: string, values: unknown[]): string[] {
+  const hosts: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string" || sameProxy(value, proxyBaseUrl)) {
+      continue;
+    }
+    const host = hostnameOf(value);
+    if (host && !hosts.includes(host)) {
+      hosts.push(host);
+    }
+  }
+  return hosts;
+}
+
+function anthropicBaseValues(env: unknown): unknown[] {
+  if (Array.isArray(env)) {
+    return env
+      .filter(isAnthropicBaseEntry)
+      .map((entry) => (entry as { value?: unknown }).value);
+  }
+  if (env && typeof env === "object") {
+    return [(env as Record<string, unknown>).ANTHROPIC_BASE_URL];
+  }
+  return [];
+}
+
+function isAnthropicBaseEntry(entry: unknown): boolean {
+  return (
+    !!entry &&
+    typeof entry === "object" &&
+    (entry as { name?: unknown }).name === "ANTHROPIC_BASE_URL"
+  );
+}
+
+function withoutKey(
+  doc: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const next = { ...doc };
+  delete next[key];
+  return next;
+}
+
+function withoutVsCodeBaseUrl(
+  doc: Record<string, unknown>,
+): Record<string, unknown> {
+  const env = doc[VS_CODE_ENV];
+  if (Array.isArray(env)) {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: env.filter((entry) => !isAnthropicBaseEntry(entry)),
+    };
+  }
+  if (env && typeof env === "object") {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: withoutKey(
+        env as Record<string, unknown>,
+        "ANTHROPIC_BASE_URL",
+      ),
+    };
+  }
+  return { ...doc };
+}
+
+function withVsCodeBaseUrl(
+  doc: Record<string, unknown>,
+  url: string,
+): Record<string, unknown> {
+  const env = doc[VS_CODE_ENV];
+  if (Array.isArray(env)) {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: [
+        ...env.filter((entry) => !isAnthropicBaseEntry(entry)),
+        { name: "ANTHROPIC_BASE_URL", value: url },
+      ],
+    };
+  }
+  if (env && typeof env === "object") {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: {
+        ...(env as Record<string, unknown>),
+        ANTHROPIC_BASE_URL: url,
+      },
+    };
+  }
+  return {
+    ...doc,
+    [VS_CODE_ENV]: [{ name: "ANTHROPIC_BASE_URL", value: url }],
+  };
 }
 
 function catalogView(

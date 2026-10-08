@@ -52,6 +52,29 @@ function renderSnippet(snippet: CourseSnippetView): string {
   </article>`;
 }
 
+function clientLabel(client: "codex" | "claude" | "vscode"): string {
+  if (client === "codex") {
+    return "Codex";
+  }
+  if (client === "claude") {
+    return "Claude Code";
+  }
+  return "VS Code";
+}
+
+function renderRestart(view: ClassroomAppView): string {
+  const clients = view.mustRestart ?? [];
+  if (clients.length === 0) {
+    return "";
+  }
+  const names = clients.map((client) => clientLabel(client));
+  const joined =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join("、")} 與 ${names[names.length - 1]}`;
+  return `<p class="restart">請完全退出 ${escapeHtml(joined)}，再重新打開。</p>`;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -71,6 +94,10 @@ export function renderPage(view: ClassroomAppView): string {
   const notice = view.notice
     ? `<p class="notice">${escapeHtml(view.notice)}</p>`
     : "";
+  const restart = renderRestart(view);
+  const stop = `<form class="stop" method="post" action="/stop">
+        <button type="submit">停止</button>
+      </form>`;
   const current =
     view.mode === "classroom"
       ? `Classroom${view.modelId ? ` · ${escapeHtml(view.modelId)}` : ""}`
@@ -151,7 +178,9 @@ export function renderPage(view: ClassroomAppView): string {
       overflow-wrap: anywhere;
       margin: 0;
     }
-    .switch {
+    .switch,
+    .restart,
+    .stop {
       display: flex;
       flex-direction: column;
       gap: 0.35rem;
@@ -178,6 +207,7 @@ export function renderPage(view: ClassroomAppView): string {
     ${classLabel}
     ${detail}
     ${notice}
+    ${restart}
     ${actions}
     <form class="folder" method="post" action="/project-folder">
       <label>專案資料夾 <input name="project_folder" autocomplete="off"${folderValue}></label>
@@ -185,6 +215,7 @@ export function renderPage(view: ClassroomAppView): string {
       ${installNotice}
     </form>
     ${modelSwitch}
+    ${stop}
   </main>
   ${catalog}
   <script>
