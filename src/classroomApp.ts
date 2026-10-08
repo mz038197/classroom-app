@@ -28,6 +28,12 @@ const ENVIRONMENT_LABEL: Record<EnvironmentToolId, string> = {
   pwsh: "PowerShell 7",
 };
 
+export type MustRestartClient = "codex" | "claude" | "vscode";
+
+export type CopilotDocument = {
+  providers: Array<Record<string, unknown>>;
+};
+
 export type ClassroomAppDeps = {
   router: {
     redeemNickname(body: {
@@ -67,6 +73,14 @@ export type ClassroomAppDeps = {
     clearApiKey(): Promise<void>;
   };
   stopProcess(): void;
+  proxyBaseUrl: string;
+  copilot: {
+    read(): Promise<CopilotDocument>;
+    write(doc: CopilotDocument): Promise<void>;
+  };
+  proxy: {
+    receive(request: { provider: "VCRouter" }): Promise<void>;
+  };
 };
 
 export type CourseActionView = {
@@ -116,6 +130,7 @@ export type ClassroomAppView = {
   modelId?: string;
   tools: EnvironmentToolView[];
   environmentNotice?: string;
+  mustRestart?: MustRestartClient[];
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
@@ -145,6 +160,8 @@ export class ClassroomApp {
   };
   private environmentSelected = new Set<EnvironmentToolId>();
   private environmentNotice: string | undefined;
+  private proxyRunning = false;
+  private mustRestart: MustRestartClient[] = [];
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -186,6 +203,9 @@ export class ClassroomApp {
     }
     if (this.environmentNotice) {
       view.environmentNotice = this.environmentNotice;
+    }
+    if (this.mustRestart.length > 0) {
+      view.mustRestart = [...this.mustRestart];
     }
     return view;
   }
@@ -256,6 +276,38 @@ export class ClassroomApp {
       installed: this.environmentInstalled[id],
       selected: this.environmentSelected.has(id),
     }));
+  }
+
+  async start(): Promise<void> {
+    const doc = await this.deps.copilot.read();
+    const providers = Array.isArray(doc.providers) ? doc.providers : [];
+    const already = providers.some((provider) => provider?.name === "VCRouter");
+    if (!already) {
+      await this.deps.copilot.write({
+        providers: [
+          ...providers,
+          { name: "VCRouter", url: this.deps.proxyBaseUrl },
+        ],
+      });
+      if (!this.mustRestart.includes("vscode")) {
+        this.mustRestart.push("vscode");
+      }
+    }
+    this.proxyRunning = true;
+  }
+
+  stop(): void {
+    this.proxyRunning = false;
+  }
+
+  async copilotRequest(selection: string): Promise<void> {
+    if (selection !== "VCRouter") {
+      return;
+    }
+    if (!this.proxyRunning) {
+      throw new Error("VCRouter 目前無法使用。請先啟動 Classroom App。");
+    }
+    await this.deps.proxy.receive({ provider: "VCRouter" });
   }
 
   prepare(actionId: string): void {

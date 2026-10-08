@@ -34,6 +34,7 @@ function harness(
       tool: EnvironmentToolId,
       cwd: string,
     ) => Promise<{ exitCode: number | undefined; output: string }>;
+    providers?: Array<Record<string, unknown>>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
@@ -43,6 +44,9 @@ function harness(
   const probeCalls: EnvironmentToolId[] = [];
   const installCalls: { tool: EnvironmentToolId; cwd: string }[] = [];
   const modelKeys: string[] = [];
+  let providers = structuredClone(options?.providers ?? []);
+  const copilotWrites: { providers: Array<Record<string, unknown>> }[] = [];
+  const proxyReceived: string[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
   let clipboardWrites = 0;
@@ -145,6 +149,21 @@ function harness(
     stopProcess() {
       stops += 1;
     },
+    proxyBaseUrl: "http://127.0.0.1:47821",
+    copilot: {
+      async read() {
+        return { providers: structuredClone(providers) };
+      },
+      async write(doc) {
+        copilotWrites.push(structuredClone(doc));
+        providers = structuredClone(doc.providers);
+      },
+    },
+    proxy: {
+      async receive(request) {
+        proxyReceived.push(request.provider);
+      },
+    },
   });
   return {
     app,
@@ -156,6 +175,9 @@ function harness(
     stops: () => stops,
     catalogKeys,
     fileReads,
+    copilotWrites: () => copilotWrites,
+    copilotProviders: () => structuredClone(providers),
+    proxyReceived: () => [...proxyReceived],
     runCalls,
     probeCalls,
     installCalls,
@@ -827,6 +849,9 @@ actions:
     assert.equal(app.view().mode, "classroom");
     assert.equal(app.view().modelId, "second-looking-but-first");
     assert.equal(app.view().commandRunning, true);
+    await app.setSwitch("native");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().commandRunning, true);
     await app.setProjectFolder("D:\\other");
     assert.equal(app.view().projectFolder, "D:\\lesson");
     assert.deepEqual(fileReads, []);
@@ -1062,5 +1087,125 @@ describe("close window", () => {
     await app.copyKey();
     assert.equal(clipboardWrites(), 1);
     assert.equal(stops(), 0);
+  });
+});
+
+describe("VCRouter", () => {
+  it("appends one VCRouter addressed at the local proxy and leaves other providers unchanged", async () => {
+    const openRouter = {
+      name: "OpenRouter",
+      vendor: "openrouter",
+      apiKey: "keep-me",
+      models: [{ id: "keep-or", name: "keep-or" }],
+    };
+    const { app, copilotWrites, storedKey } = harness(undefined, {
+      providers: [openRouter],
+    });
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(storedKey(), KEY);
+    await app.start();
+    assert.equal(copilotWrites().length, 1);
+    const written = copilotWrites()[0];
+    assert.deepEqual(written?.providers[0], openRouter);
+    assert.deepEqual(written?.providers[1], {
+      name: "VCRouter",
+      url: "http://127.0.0.1:47821",
+    });
+    assert.equal(written?.providers.length, 2);
+    assert.equal(Object.hasOwn(written?.providers[1] ?? {}, "apiKey"), false);
+    assert.equal(JSON.stringify(written).includes(KEY), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("asks for a full VS Code restart only when VCRouter is inserted", async () => {
+    const { app } = harness(undefined, {
+      providers: [{ name: "OpenRouter", apiKey: "keep-me" }],
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    assert.deepEqual(app.view().mustRestart, ["vscode"]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not write when VCRouter is already present", async () => {
+    const existing = [
+      { name: "OpenRouter", apiKey: "keep-me" },
+      {
+        name: "VCRouter",
+        url: "http://127.0.0.1:9",
+        models: [{ id: "leave-me" }],
+      },
+    ];
+    const { app, copilotWrites } = harness(undefined, { providers: existing });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.setSwitch("native");
+    assert.equal(copilotWrites().length, 0);
+    assert.equal(app.view().mustRestart, undefined);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not add or remove providers when the switch changes after the first insert", async () => {
+    const { app, copilotWrites, copilotProviders } = harness(undefined, {
+      providers: [{ name: "OpenRouter", apiKey: "keep-me" }],
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    const afterInsert = copilotProviders();
+    await app.setSwitch("classroom");
+    await app.setSwitch("native");
+    assert.deepEqual(copilotProviders(), afterInsert);
+    assert.equal(copilotWrites().length, 1);
+    assert.equal(
+      afterInsert.filter((provider) => provider.name === "VCRouter").length,
+      1,
+    );
+    assert.equal(
+      afterInsert.some((provider) => provider.name === "OpenRouter"),
+      true,
+    );
+  });
+
+  it("refuses VCRouter while the proxy is stopped and never sends Native into it", async () => {
+    const { app, proxyReceived } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+    await app.stop();
+    await assert.rejects(() => app.copilotRequest("VCRouter"), (err: unknown) => {
+      assert.equal(String(err).includes(KEY), false);
+      return true;
+    });
+    assert.deepEqual(proxyReceived(), []);
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+  });
+
+  it("accepts VCRouter after start again and still skips Native", async () => {
+    const { app, proxyReceived, copilotProviders } = harness();
+    await app.start();
+    await app.stop();
+    assert.equal(
+      copilotProviders().some((provider) => provider.name === "VCRouter"),
+      true,
+    );
+    await app.start();
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+    await app.copilotRequest("VCRouter");
+    assert.deepEqual(proxyReceived(), ["VCRouter"]);
+  });
+
+  it("does not stop the proxy when the window closes", async () => {
+    const { app, stops, proxyReceived } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    app.closeWindow();
+    assert.equal(stops(), 0);
+    await app.copilotRequest("VCRouter");
+    assert.deepEqual(proxyReceived(), ["VCRouter"]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 });

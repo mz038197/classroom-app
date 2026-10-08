@@ -18,6 +18,53 @@ function storageFile(): string {
   return path.join(root, "classroom-app", "connection.json");
 }
 
+function copilotModelsFile(): string {
+  const roaming = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  return path.join(roaming, "Code", "User", "chatLanguageModels.json");
+}
+
+function isProviderRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+async function readCopilotProviders(): Promise<{
+  providers: Array<Record<string, unknown>>;
+}> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(copilotModelsFile(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { providers: [] };
+    }
+    throw err;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { providers: [] };
+  }
+  const parsed: unknown = JSON.parse(trimmed);
+  if (Array.isArray(parsed)) {
+    return { providers: parsed.filter(isProviderRecord) };
+  }
+  if (isProviderRecord(parsed) && Array.isArray(parsed.providers)) {
+    return { providers: parsed.providers.filter(isProviderRecord) };
+  }
+  throw new Error("Copilot 設定格式無法辨識");
+}
+
+async function writeCopilotProviders(doc: {
+  providers: Array<Record<string, unknown>>;
+}): Promise<void> {
+  const target = copilotModelsFile();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(
+    target,
+    `${JSON.stringify(doc.providers, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function createFileStorage(filePath: string) {
   return {
     async getApiKey(): Promise<string | undefined> {
@@ -347,6 +394,16 @@ async function main(): Promise<void> {
     stopProcess() {
       // 關視窗不呼叫這裡。之後的停止票才會停代理。
     },
+    proxyBaseUrl: pageUrl.replace(/\/$/, ""),
+    copilot: {
+      read: readCopilotProviders,
+      write: writeCopilotProviders,
+    },
+    proxy: {
+      async receive() {
+        // 選了 VCRouter 才進這裡。轉送留給路由票。
+      },
+    },
   });
 
   const server = http.createServer(async (req, res) => {
@@ -450,6 +507,9 @@ async function main(): Promise<void> {
     process.exit(1);
   });
   server.listen(port, "127.0.0.1", () => {
+    void app.start().catch(() => {
+      process.stderr.write("無法寫入 VCRouter。\n");
+    });
     const tray = openTray(pageUrl);
     openBrowser(pageUrl);
     const shutdown = () => {
