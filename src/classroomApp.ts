@@ -1,4 +1,14 @@
-import { parseCourseCatalog } from "./courseCatalog";
+import {
+  parseCourseCatalog,
+  type InstallAction,
+  type LessonSnippet,
+} from "./courseCatalog";
+import {
+  VS_CODE_ENV,
+  anthropicBaseValues,
+  withVsCodeBaseUrl,
+  withoutVsCodeBaseUrl,
+} from "./routeFiles";
 
 export type NicknameRedeemResult = {
   api_key: string;
@@ -12,14 +22,9 @@ export type NicknameRedeemResult = {
 
 export type ModelSwitchMode = "native" | "classroom";
 
-export type EnvironmentToolId = "uv" | "git" | "node" | "pwsh";
+export const ENVIRONMENT_TOOLS = ["uv", "git", "node", "pwsh"] as const;
 
-const ENVIRONMENT_TOOLS: readonly EnvironmentToolId[] = [
-  "uv",
-  "git",
-  "node",
-  "pwsh",
-];
+export type EnvironmentToolId = (typeof ENVIRONMENT_TOOLS)[number];
 
 const ENVIRONMENT_LABEL: Record<EnvironmentToolId, string> = {
   uv: "uv",
@@ -91,28 +96,42 @@ export type ClassroomAppDeps = {
     stop(): void;
     receive(request: { provider: "VCRouter" }): Promise<void>;
   };
-};
-
-export type CourseActionView = {
-  id: string;
-  title: string;
-  kind: "skill" | "package" | "mcp";
-  command: string;
-  description?: string;
-};
-
-export type CourseSnippetView = {
-  id: string;
-  title: string;
-  body: string;
-  pasteHint?: string;
+  send(upstream: UpstreamSend): Promise<void>;
 };
 
 export type CourseCatalogView = {
   source: "remote" | "local";
-  actions: CourseActionView[];
-  snippets?: CourseSnippetView[];
+  actions: InstallAction[];
+  snippets?: LessonSnippet[];
   localNote?: string;
+};
+
+export type ProxyClient = "codex" | "claude" | "copilot";
+
+export type UpstreamTarget = "router" | "chatgpt" | "claude.ai";
+
+export type UpstreamSend = {
+  client: ProxyClient;
+  target: UpstreamTarget;
+  model: string;
+  apiKey?: string;
+  method?: string;
+  path?: string;
+  body?: string;
+};
+
+export type ForwardedRecord = {
+  client: ProxyClient;
+  target: UpstreamTarget;
+  model: string;
+};
+
+export type ClientForward = {
+  client: ProxyClient;
+  model: string;
+  method?: string;
+  path?: string;
+  body?: string;
 };
 
 export type EnvironmentToolView = {
@@ -146,8 +165,6 @@ export type ClassroomAppView = {
 const LOCAL_LIST_NOTE = "這是本機清單。";
 const INSTALL_UNAVAILABLE = "尚未指定專案資料夾，安裝不可用。";
 const REOPEN_TERMINAL = "請重開終端機再重新檢查。";
-const ALREADY_INSTALLED = /xcode-select:[\s\S]*already installed/i;
-
 export class ClassroomApp {
   private connected = false;
   private classLabel: string | undefined;
@@ -297,6 +314,58 @@ export class ClassroomApp {
       throw new Error("VCRouter 目前無法使用。請先啟動 Classroom App。");
     }
     await this.deps.proxy.receive({ provider: "VCRouter" });
+    const upstream = await this.classroomUpstream("copilot");
+    if (!upstream) {
+      return;
+    }
+    await this.deps.send(upstream);
+  }
+
+  async forward(request: ClientForward): Promise<ForwardedRecord> {
+    if (!this.proxyRunning) {
+      throw new Error(
+        request.client === "copilot"
+          ? "VCRouter 目前無法使用。請先啟動 Classroom App。"
+          : "代理沒有在跑。",
+      );
+    }
+    if (request.client === "copilot") {
+      await this.deps.proxy.receive({ provider: "VCRouter" });
+      const upstream = await this.classroomUpstream("copilot");
+      if (!upstream) {
+        throw new Error("沒有上課模型。");
+      }
+      await this.deps.send(withHttp(upstream, request));
+      return forwardedRecord(upstream);
+    }
+    if (this.mode === "classroom") {
+      const upstream = await this.classroomUpstream(request.client);
+      if (!upstream) {
+        throw new Error("沒有上課模型。");
+      }
+      await this.deps.send(withHttp(upstream, request));
+      return forwardedRecord(upstream);
+    }
+    const target: UpstreamTarget =
+      request.client === "codex" ? "chatgpt" : "claude.ai";
+    const upstream: UpstreamSend = {
+      client: request.client,
+      target,
+      model: request.model,
+    };
+    await this.deps.send(withHttp(upstream, request));
+    return forwardedRecord(upstream);
+  }
+
+  private async classroomUpstream(
+    client: ProxyClient,
+  ): Promise<UpstreamSend | undefined> {
+    const apiKey = await this.deps.storage.getApiKey();
+    const model = this.modelIds[0];
+    if (!apiKey || !model) {
+      return undefined;
+    }
+    return { client, target: "router", model, apiKey };
   }
 
   prepare(actionId: string): void {
@@ -390,6 +459,10 @@ export class ClassroomApp {
       return;
     }
     this.mode = "classroom";
+  }
+
+  async reloadCatalog(): Promise<void> {
+    await this.loadCatalog();
   }
 
   async reloadAllowlist(): Promise<void> {
@@ -524,15 +597,14 @@ export class ClassroomApp {
       await this.loadLocalCatalog();
       return;
     }
-    if (typeof body?.course_catalog_yaml !== "string") {
+    const yaml = usableCatalogYaml(body?.course_catalog_yaml);
+    if (yaml === undefined) {
       await this.loadLocalCatalog();
       return;
     }
-    const parsed = parseCourseCatalog(body.course_catalog_yaml);
+    const parsed = parseCourseCatalog(yaml);
     if (!parsed.ok) {
-      this.catalog = undefined;
-      this.catalogError = parsed.error;
-      this.remoteCatalogHeld = false;
+      await this.loadLocalCatalog();
       return;
     }
     this.catalog = catalogView(parsed.actions, parsed.snippets, "remote");
@@ -569,8 +641,6 @@ export class ClassroomApp {
   }
 }
 
-const VS_CODE_ENV = "claudeCode.environmentVariables";
-
 function hostnameOf(value: string): string | undefined {
   try {
     const host = new URL(value).hostname;
@@ -602,26 +672,6 @@ function previousHosts(proxyBaseUrl: string, values: unknown[]): string[] {
   return hosts;
 }
 
-function anthropicBaseValues(env: unknown): unknown[] {
-  if (Array.isArray(env)) {
-    return env
-      .filter(isAnthropicBaseEntry)
-      .map((entry) => (entry as { value?: unknown }).value);
-  }
-  if (env && typeof env === "object") {
-    return [(env as Record<string, unknown>).ANTHROPIC_BASE_URL];
-  }
-  return [];
-}
-
-function isAnthropicBaseEntry(entry: unknown): boolean {
-  return (
-    !!entry &&
-    typeof entry === "object" &&
-    (entry as { name?: unknown }).name === "ANTHROPIC_BASE_URL"
-  );
-}
-
 function withoutKey(
   doc: Record<string, unknown>,
   key: string,
@@ -631,57 +681,6 @@ function withoutKey(
   return next;
 }
 
-function withoutVsCodeBaseUrl(
-  doc: Record<string, unknown>,
-): Record<string, unknown> {
-  const env = doc[VS_CODE_ENV];
-  if (Array.isArray(env)) {
-    return {
-      ...doc,
-      [VS_CODE_ENV]: env.filter((entry) => !isAnthropicBaseEntry(entry)),
-    };
-  }
-  if (env && typeof env === "object") {
-    return {
-      ...doc,
-      [VS_CODE_ENV]: withoutKey(
-        env as Record<string, unknown>,
-        "ANTHROPIC_BASE_URL",
-      ),
-    };
-  }
-  return { ...doc };
-}
-
-function withVsCodeBaseUrl(
-  doc: Record<string, unknown>,
-  url: string,
-): Record<string, unknown> {
-  const env = doc[VS_CODE_ENV];
-  if (Array.isArray(env)) {
-    return {
-      ...doc,
-      [VS_CODE_ENV]: [
-        ...env.filter((entry) => !isAnthropicBaseEntry(entry)),
-        { name: "ANTHROPIC_BASE_URL", value: url },
-      ],
-    };
-  }
-  if (env && typeof env === "object") {
-    return {
-      ...doc,
-      [VS_CODE_ENV]: {
-        ...(env as Record<string, unknown>),
-        ANTHROPIC_BASE_URL: url,
-      },
-    };
-  }
-  return {
-    ...doc,
-    [VS_CODE_ENV]: [{ name: "ANTHROPIC_BASE_URL", value: url }],
-  };
-}
-
 function environmentInstallSucceeded(result: {
   exitCode: number | undefined;
   output: string;
@@ -689,7 +688,42 @@ function environmentInstallSucceeded(result: {
   if (result.exitCode === 0) {
     return true;
   }
-  return ALREADY_INSTALLED.test(result.output);
+  if (typeof result.exitCode !== "number") {
+    return false;
+  }
+  return (
+    /already installed/i.test(result.output) ||
+    /no available upgrade found/i.test(result.output)
+  );
+}
+
+function usableCatalogYaml(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") {
+    return undefined;
+  }
+  return value;
+}
+
+function withHttp(upstream: UpstreamSend, request: ClientForward): UpstreamSend {
+  const next: UpstreamSend = { ...upstream };
+  if (request.method !== undefined) {
+    next.method = request.method;
+  }
+  if (request.path !== undefined) {
+    next.path = request.path;
+  }
+  if (request.body !== undefined) {
+    next.body = request.body;
+  }
+  return next;
+}
+
+function forwardedRecord(upstream: UpstreamSend): ForwardedRecord {
+  return {
+    client: upstream.client,
+    target: upstream.target,
+    model: upstream.model,
+  };
 }
 
 function catalogView(

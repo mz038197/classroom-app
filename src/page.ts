@@ -1,5 +1,9 @@
-import type { ClassroomAppView, CourseActionView, CourseSnippetView } from "./classroomApp";
-import { actionKindLabel } from "./courseCatalog";
+import type { ClassroomAppView } from "./classroomApp";
+import {
+  actionKindLabel,
+  type InstallAction,
+  type LessonSnippet,
+} from "./courseCatalog";
 
 function renderCatalog(view: ClassroomAppView): string {
   if (!view.catalog && !view.catalogError) {
@@ -29,7 +33,7 @@ function renderCatalog(view: ClassroomAppView): string {
   </section>`;
 }
 
-function renderAction(action: CourseActionView, commandRunning: boolean): string {
+function renderAction(action: InstallAction, commandRunning: boolean): string {
   const description = action.description
     ? `<p>${escapeHtml(action.description)}</p>`
     : "";
@@ -106,7 +110,7 @@ function renderEnvironment(view: ClassroomAppView): string {
   </section>`;
 }
 
-function renderSnippet(snippet: CourseSnippetView): string {
+function renderSnippet(snippet: LessonSnippet): string {
   const hint = snippet.pasteHint
     ? `<p class="paste-hint">${escapeHtml(snippet.pasteHint)}</p>`
     : "";
@@ -185,7 +189,7 @@ export function renderPage(view: ClassroomAppView): string {
         <button type="submit" name="mode" value="native">Native</button>
       </form>
       <form method="post" action="/reload">
-        <button type="submit">重新載入模型</button>
+        <button type="submit">重新載入</button>
       </form>
     </section>`;
   const actions = view.canCopyKey

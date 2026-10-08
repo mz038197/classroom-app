@@ -1,18 +1,33 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {
   ClassroomApp,
+  ENVIRONMENT_TOOLS,
   type EnvironmentToolId,
   type NicknameRedeemResult,
+  type ProxyClient,
+  type UpstreamSend,
+  type UpstreamTarget,
 } from "./classroomApp";
 import { renderPage } from "./page";
 import { createRouteFiles } from "./routeFiles";
 
 const port = 47821;
 const pageUrl = `http://127.0.0.1:${port}/`;
+const nodeRequire = createRequire(__filename);
+const responseSlot = new AsyncLocalStorage<{ status: number; body: string }>();
+
+function routerBaseUrl(): string {
+  return (
+    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
+  ).replace(/\/+$/, "");
+}
 
 function routePaths() {
   const appData =
@@ -129,9 +144,7 @@ function modelIdsInRouterOrder(payload: unknown): string[] {
 }
 
 async function fetchSessionModels(apiKey: string): Promise<string[]> {
-  const root = (
-    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
-  ).replace(/\/+$/, "");
+  const root = routerBaseUrl();
   const response = await fetch(`${root}/extension/chat-language-models`, {
     headers: {
       Accept: "application/json",
@@ -160,9 +173,7 @@ function isRedeemResult(value: unknown): value is NicknameRedeemResult {
 async function fetchCourseCatalog(
   apiKey: string,
 ): Promise<{ course_catalog_yaml?: unknown }> {
-  const root = (
-    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
-  ).replace(/\/+$/, "");
+  const root = routerBaseUrl();
   const response = await fetch(`${root}/extension/course-catalog`, {
     method: "GET",
     headers: {
@@ -197,9 +208,7 @@ async function redeemNickname(body: {
   invite_code: string;
   nickname: string;
 }): Promise<NicknameRedeemResult> {
-  const root = (
-    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
-  ).replace(/\/+$/, "");
+  const root = routerBaseUrl();
   const response = await fetch(
     `${root}/extension/sessions/nickname-redeem`,
     {
@@ -224,33 +233,70 @@ async function redeemNickname(body: {
   return json;
 }
 
-const ENVIRONMENT_TOOL_IDS: readonly EnvironmentToolId[] = [
-  "uv",
-  "git",
-  "node",
-  "pwsh",
-];
-
 function isEnvironmentTool(value: string): value is EnvironmentToolId {
-  return (ENVIRONMENT_TOOL_IDS as readonly string[]).includes(value);
+  return (ENVIRONMENT_TOOLS as readonly string[]).includes(value);
+}
+
+const MAC_PWSH_PAGE =
+  "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-macos";
+
+function collectOutput(
+  command: string,
+  args: string[],
+  cwd?: string,
+): Promise<{ exitCode: number | undefined; output: string; spawnError: boolean }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: {
+      exitCode: number | undefined;
+      output: string;
+      spawnError: boolean;
+    }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+    const child = spawn(command, args, {
+      cwd,
+      windowsHide: process.platform === "win32",
+    });
+    const chunks: Buffer[] = [];
+    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.on("error", () => {
+      finish({
+        exitCode: 1,
+        output: Buffer.concat(chunks).toString("utf8"),
+        spawnError: true,
+      });
+    });
+    child.on("close", (code) => {
+      finish({
+        exitCode: code === null ? undefined : code,
+        output: Buffer.concat(chunks).toString("utf8"),
+        spawnError: false,
+      });
+    });
+  });
+}
+
+function shellLaunch(command: string): { command: string; args: string[] } {
+  if (process.platform === "win32") {
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", command] };
+  }
+  return { command: "sh", args: ["-c", command] };
 }
 
 function probeEnvironment(
   tool: EnvironmentToolId,
 ): Promise<{ installed: boolean }> {
-  return new Promise((resolve) => {
-    const child = spawn(tool, ["--version"], { windowsHide: true });
-    let output = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
-    });
-    child.on("error", () => resolve({ installed: false }));
-    child.on("close", (code) => {
-      resolve({ installed: code === 0 || /\d/.test(output) });
-    });
+  return collectOutput(tool, ["--version"]).then((result) => {
+    if (result.spawnError) {
+      return { installed: false };
+    }
+    return { installed: result.exitCode === 0 || /\d/.test(result.output) };
   });
 }
 
@@ -258,26 +304,31 @@ function installEnvironment(
   tool: EnvironmentToolId,
   cwd: string,
 ): Promise<{ exitCode: number | undefined; output: string }> {
-  const command = environmentInstallCommand(tool);
-  return new Promise((resolve) => {
-    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
-      cwd,
-      windowsHide: true,
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.on("error", () => resolve({ exitCode: 1, output: "安裝命令無法啟動。" }));
-    child.on("close", (code) => {
-      resolve({
-        exitCode: code === null ? undefined : code,
-        output: Buffer.concat(chunks).toString("utf8"),
-      });
-    });
+  const launch =
+    process.platform === "darwin" && tool === "pwsh"
+      ? { command: "open", args: [MAC_PWSH_PAGE] }
+      : shellLaunch(environmentInstallCommand(tool));
+  return collectOutput(launch.command, launch.args, cwd).then((result) => {
+    if (result.spawnError) {
+      return { exitCode: 1, output: "安裝命令無法啟動。" };
+    }
+    return { exitCode: result.exitCode, output: result.output };
   });
 }
 
 function environmentInstallCommand(tool: EnvironmentToolId): string {
+  if (process.platform === "darwin") {
+    if (tool === "uv") {
+      return "curl -LsSf https://astral.sh/uv/install.sh | sh";
+    }
+    if (tool === "git") {
+      return "xcode-select --install";
+    }
+    if (tool === "node") {
+      return 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash && . "$HOME/.nvm/nvm.sh" && nvm install --lts && nvm alias default \'lts/*\'';
+    }
+    return "";
+  }
   const quiet =
     "--source winget --disable-interactivity -h --accept-package-agreements --accept-source-agreements";
   if (tool === "uv") {
@@ -293,16 +344,12 @@ function environmentInstallCommand(tool: EnvironmentToolId): string {
 }
 
 function runCommand(cwd: string, command: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
-      cwd,
-      windowsHide: true,
-    });
-    const chunks: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.on("error", () => reject(new Error("command failed")));
-    child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  const launch = shellLaunch(command);
+  return collectOutput(launch.command, launch.args, cwd).then((result) => {
+    if (result.spawnError) {
+      throw new Error("command failed");
+    }
+    return result.output;
   });
 }
 
@@ -337,13 +384,13 @@ function writeClipboard(text: string): Promise<void> {
   });
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > 16_384) {
+      if (size > max) {
         reject(new Error("body too large"));
         req.destroy();
         return;
@@ -361,12 +408,36 @@ function redirect(res: http.ServerResponse): void {
 }
 
 function openBrowser(url: string): void {
-  const child = spawn("cmd.exe", ["/d", "/c", "start", "", url], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  child.unref();
+  if (process.platform === "darwin") {
+    spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
+    return;
+  }
+  if (process.platform === "win32") {
+    spawn("cmd.exe", ["/d", "/c", "start", "", url], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    }).unref();
+  }
+}
+
+type SeaApi = {
+  isSea: () => boolean;
+  getAsset: (key: string, encoding: string) => string;
+};
+
+function trayScriptPath(): string {
+  try {
+    const sea = nodeRequire("node:sea") as SeaApi;
+    if (sea.isSea()) {
+      const target = path.join(os.tmpdir(), "classroom-app-tray.ps1");
+      writeFileSync(target, sea.getAsset("tray.ps1", "utf8"));
+      return target;
+    }
+  } catch {
+    // 開發時 node:sea 不在，改讀旁邊的腳本。
+  }
+  return path.join(__dirname, "..", "scripts", "tray.ps1");
 }
 
 function openTray(url: string): ChildProcess {
@@ -378,11 +449,114 @@ function openTray(url: string): ChildProcess {
       "-ExecutionPolicy",
       "Bypass",
       "-File",
-      path.join(__dirname, "..", "scripts", "tray.ps1"),
+      trayScriptPath(),
       url,
     ],
     { stdio: "ignore", windowsHide: true },
   );
+}
+
+let proxyAccepting = false;
+
+function createProxy() {
+  return {
+    start() {
+      proxyAccepting = true;
+    },
+    stop() {
+      proxyAccepting = false;
+    },
+    async receive(request: { provider: "VCRouter" }) {
+      if (!proxyAccepting) {
+        throw new Error("代理已停止。");
+      }
+      if (request.provider !== "VCRouter") {
+        throw new Error("只有 VCRouter 會進入代理。");
+      }
+    },
+  };
+}
+
+function clientOf(req: http.IncomingMessage, pathname: string): ProxyClient {
+  if (pathname.endsWith("/messages") || req.headers["anthropic-version"]) {
+    return "claude";
+  }
+  const agent = String(req.headers["user-agent"] ?? "");
+  if (/copilot/i.test(agent)) {
+    return "copilot";
+  }
+  return "codex";
+}
+
+function modelFromBody(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const model = (parsed as { model?: unknown }).model;
+      if (typeof model === "string") {
+        return model;
+      }
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function rewriteModel(body: string, model: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return JSON.stringify({ ...(parsed as Record<string, unknown>), model });
+    }
+  } catch {
+    return body;
+  }
+  return body;
+}
+
+function upstreamOrigin(target: UpstreamTarget): string {
+  if (target === "router") {
+    return routerBaseUrl();
+  }
+  if (target === "chatgpt") {
+    return "https://chatgpt.com";
+  }
+  return "https://claude.ai";
+}
+
+async function sendUpstream(upstream: UpstreamSend): Promise<void> {
+  if (!proxyAccepting || !upstream.path) {
+    return;
+  }
+  const slot = responseSlot.getStore();
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (upstream.target === "router" && upstream.apiKey) {
+      headers.Authorization = `Bearer ${upstream.apiKey}`;
+    }
+    const body =
+      upstream.target === "router"
+        ? rewriteModel(upstream.body ?? "", upstream.model)
+        : upstream.body;
+    const response = await fetch(`${upstreamOrigin(upstream.target)}${upstream.path}`, {
+      method: upstream.method ?? "POST",
+      headers,
+      body,
+    });
+    const text = await response.text();
+    if (slot) {
+      slot.status = response.status;
+      slot.body = text;
+    }
+  } catch {
+    if (slot) {
+      slot.status = 502;
+      slot.body = "上游沒有回應。";
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -411,15 +585,8 @@ async function main(): Promise<void> {
       read: readCopilotProviders,
       write: writeCopilotProviders,
     },
-    proxy: {
-      start() {
-        // 這個行程的 127.0.0.1:47821 就是路由位址。轉送留給之後的票。
-      },
-      stop() {},
-      async receive() {
-        // 選了 VCRouter 才進這裡。轉送留給之後的票。
-      },
-    },
+    proxy: createProxy(),
+    send: sendUpstream,
   });
   await app.start();
 
@@ -501,8 +668,31 @@ async function main(): Promise<void> {
         return;
       }
       if (req.method === "POST" && url === "/reload") {
+        await app.reloadCatalog();
         await app.reloadAllowlist();
         redirect(res);
+        return;
+      }
+      const pathname = url.split("?")[0] ?? "/";
+      if (
+        (req.method === "POST" || req.method === "PUT") &&
+        (pathname.startsWith("/v1/") || pathname.startsWith("/backend-api/"))
+      ) {
+        const body = await readBody(req, 1_048_576);
+        const slot = { status: 502, body: "上游沒有回應。" };
+        await responseSlot.run(slot, () =>
+          app.forward({
+            client: clientOf(req, pathname),
+            model: modelFromBody(body),
+            method: req.method,
+            path: pathname,
+            body,
+          }),
+        );
+        res.writeHead(slot.status, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(slot.body);
         return;
       }
       if (req.method === "POST" && url === "/stop") {
@@ -532,10 +722,10 @@ async function main(): Promise<void> {
     void app.start().catch(() => {
       process.stderr.write("無法寫入 VCRouter。\n");
     });
-    const tray = openTray(pageUrl);
+    const tray = process.platform === "win32" ? openTray(pageUrl) : undefined;
     openBrowser(pageUrl);
     const shutdown = () => {
-      tray.kill();
+      tray?.kill();
       server.close();
       process.exit(0);
     };

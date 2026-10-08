@@ -1,6 +1,88 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+export const VS_CODE_ENV = "claudeCode.environmentVariables";
+
+export function anthropicBaseValues(env: unknown): unknown[] {
+  if (Array.isArray(env)) {
+    return env
+      .filter(isAnthropicBaseEntry)
+      .map((entry) => (entry as { value?: unknown }).value);
+  }
+  if (env && typeof env === "object") {
+    return [(env as Record<string, unknown>).ANTHROPIC_BASE_URL];
+  }
+  return [];
+}
+
+export function withVsCodeBaseUrl(
+  doc: Record<string, unknown>,
+  url: string,
+): Record<string, unknown> {
+  const env = doc[VS_CODE_ENV];
+  if (Array.isArray(env)) {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: [
+        ...env.filter((entry) => !isAnthropicBaseEntry(entry)),
+        { name: "ANTHROPIC_BASE_URL", value: url },
+      ],
+    };
+  }
+  if (env && typeof env === "object") {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: {
+        ...(env as Record<string, unknown>),
+        ANTHROPIC_BASE_URL: url,
+      },
+    };
+  }
+  return {
+    ...doc,
+    [VS_CODE_ENV]: [{ name: "ANTHROPIC_BASE_URL", value: url }],
+  };
+}
+
+export function withoutVsCodeBaseUrl(
+  doc: Record<string, unknown>,
+): Record<string, unknown> {
+  const env = doc[VS_CODE_ENV];
+  if (Array.isArray(env)) {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: env.filter((entry) => !isAnthropicBaseEntry(entry)),
+    };
+  }
+  if (env && typeof env === "object") {
+    return {
+      ...doc,
+      [VS_CODE_ENV]: withoutEnvKey(
+        env as Record<string, unknown>,
+        "ANTHROPIC_BASE_URL",
+      ),
+    };
+  }
+  return { ...doc };
+}
+
+function isAnthropicBaseEntry(entry: unknown): boolean {
+  return (
+    !!entry &&
+    typeof entry === "object" &&
+    (entry as { name?: unknown }).name === "ANTHROPIC_BASE_URL"
+  );
+}
+
+function withoutEnvKey(
+  doc: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const next = { ...doc };
+  delete next[key];
+  return next;
+}
+
 export type RouteFilePaths = {
   codex: string;
   claude: string;

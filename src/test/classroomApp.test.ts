@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ClassroomApp, type EnvironmentToolId } from "../classroomApp";
+import {
+  ClassroomApp,
+  type EnvironmentToolId,
+  type UpstreamSend,
+} from "../classroomApp";
 
 const KEY = "vcr_sk_nick";
 const PROXY = "http://127.0.0.1:47821";
@@ -51,6 +55,7 @@ function harness(
   let providers = structuredClone(options?.providers ?? []);
   const copilotWrites: { providers: Array<Record<string, unknown>> }[] = [];
   const proxyReceived: string[] = [];
+  const sent: UpstreamSend[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
   let clipboardWrites = 0;
@@ -205,6 +210,9 @@ function harness(
         proxyReceived.push(request.provider);
       },
     },
+    async send(upstream) {
+      sent.push({ ...upstream });
+    },
   });
   return {
     app,
@@ -223,6 +231,7 @@ function harness(
     copilotWrites: () => copilotWrites,
     copilotProviders: () => structuredClone(providers),
     proxyReceived: () => [...proxyReceived],
+    sent: () => sent.map((item) => ({ ...item })),
     runCalls,
     probeCalls,
     installCalls,
@@ -639,7 +648,7 @@ actions:
     assert.deepEqual(fileReads, ["D:\\lesson"]);
   });
 
-  it("rejects an illegal remote catalog without actions, snippets, or the local file", async () => {
+  it("falls back to the local file when the remote catalog is illegal", async () => {
     const { app, fileReads } = harness(undefined, {
       catalogYaml: `
 actions:
@@ -669,14 +678,64 @@ actions:
     await app.redeem("ABC12345", "Ada");
     const view = app.view();
     assert.equal(view.connected, true);
-    assert.equal(view.catalog, undefined);
-    assert.equal(view.catalogError?.includes("重複"), true);
+    assert.equal(view.catalog?.source, "local");
+    assert.equal(view.catalog?.localNote, "這是本機清單。");
+    assert.equal(view.catalog?.actions[0]?.title, "Local Only");
+    assert.equal(view.catalogError, undefined);
     assert.equal(JSON.stringify(view).includes("Partial Action"), false);
-    assert.equal(JSON.stringify(view).includes("Local Only"), false);
-    assert.deepEqual(fileReads, []);
+    assert.deepEqual(fileReads, ["D:\\lesson"]);
   });
 
-  it("does not fall back when the remote YAML string is present but empty", async () => {
+  it("fails the whole catalog when the remote and local files are both illegal", async () => {
+    const { app } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: partial
+    title: Partial Action
+    kind: nope
+    command: echo hi
+`,
+      files: {
+        "D:\\lesson": `
+actions:
+  - id: local
+    title: Local Partial
+    kind: skill
+    command: echo local
+snippets:
+  - id: stub
+    title: A
+    body: a
+  - id: stub
+    title: B
+    body: b
+`,
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    const view = app.view();
+    assert.equal(view.catalog, undefined);
+    assert.equal(typeof view.catalogError, "string");
+    assert.equal(JSON.stringify(view).includes("Partial Action"), false);
+    assert.equal(JSON.stringify(view).includes("Local Partial"), false);
+  });
+
+  it("fails the whole catalog when the remote YAML does not parse and the local file is missing", async () => {
+    const { app, fileReads } = harness(undefined, {
+      catalogYaml: "[\n",
+      files: {},
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    const view = app.view();
+    assert.equal(view.catalog, undefined);
+    assert.equal(view.catalogError, "找不到 classroom-installs.yaml");
+    assert.equal(JSON.stringify(view).includes("actions"), false);
+    assert.deepEqual(fileReads, ["D:\\lesson"]);
+  });
+
+  it("reads the local file when the remote YAML string is empty", async () => {
     const { app, fileReads } = harness(undefined, {
       catalogYaml: "",
       files: {
@@ -691,9 +750,51 @@ actions:
     });
     await app.setProjectFolder("D:\\lesson");
     await app.redeem("ABC12345", "Ada");
-    assert.equal(app.view().catalog, undefined);
-    assert.equal(JSON.stringify(app.view()).includes("Local Only"), false);
+    assert.equal(app.view().catalog?.source, "local");
+    assert.equal(app.view().catalog?.actions[0]?.title, "Local Only");
+    assert.equal(app.view().catalog?.localNote, "這是本機清單。");
+    assert.deepEqual(fileReads, ["D:\\lesson"]);
+  });
+
+  it("reloadCatalog fetches the remote catalog again after a held remote list", async () => {
+    let yaml = "actions: []\n";
+    const { app, fileReads, catalogKeys } = harness(undefined, {
+      get catalogYaml() {
+        return yaml;
+      },
+      files: {
+        "D:\\lesson": `
+actions:
+  - id: local
+    title: Local Only
+    kind: skill
+    command: echo local
+`,
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(app.view().catalog?.source, "remote");
+    assert.deepEqual(app.view().catalog?.actions, []);
     assert.deepEqual(fileReads, []);
+    yaml = `
+actions:
+  - id: next
+    title: Reloaded
+    kind: package
+    command: echo next
+`;
+    await app.setProjectFolder("D:\\other");
+    assert.equal(app.view().projectFolder, "D:\\other");
+    assert.equal(app.view().catalog?.source, "remote");
+    assert.deepEqual(app.view().catalog?.actions, []);
+    await app.reloadCatalog();
+    assert.equal(app.view().catalog?.source, "remote");
+    assert.equal(app.view().catalog?.actions[0]?.title, "Reloaded");
+    assert.equal(app.view().catalog?.localNote, undefined);
+    assert.deepEqual(fileReads, []);
+    assert.equal(catalogKeys.length, 2);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 
   it("loads the remote catalog without a Project Folder and does not read a local file", async () => {
@@ -1307,6 +1408,37 @@ actions:
     assert.equal(probeCalls.length, probesAfterCheck);
     assert.equal(JSON.stringify(view).includes(KEY), false);
   });
+
+  it("treats winget already-installed wording as success and does not mark the tool ready", async () => {
+    const { app, installCalls, probeCalls } = harness(undefined, {
+      async install(tool) {
+        if (tool === "git") {
+          return { exitCode: 1, output: "No available upgrade found.\n" };
+        }
+        if (tool === "node") {
+          return {
+            exitCode: -1978335189,
+            output: "Found an existing package already installed.\n",
+          };
+        }
+        return { exitCode: 1, output: "boom" };
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.checkEnvironment();
+    const probesAfterCheck = probeCalls.length;
+    app.selectEnvironment(["pwsh", "node", "git"]);
+    await app.confirmEnvironment();
+    assert.deepEqual(
+      installCalls.map((call) => call.tool),
+      ["git", "node", "pwsh"],
+    );
+    const view = app.view();
+    assert.equal(view.tools.every((tool) => tool.installed === false), true);
+    assert.equal(view.environmentNotice, "請重開終端機再重新檢查。");
+    assert.equal(probeCalls.length, probesAfterCheck);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
 });
 
 describe("close window", () => {
@@ -1450,6 +1582,106 @@ describe("VCRouter", () => {
     assert.deepEqual(proxyReceived(), []);
     await app.copilotRequest("VCRouter");
     assert.deepEqual(proxyReceived(), ["VCRouter"]);
+  });
+
+  it("forwards classroom Codex and Claude to the router with the first id and the key", async () => {
+    const { app, sent } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    const codex = await app.forward({ client: "codex", model: "gpt-incoming" });
+    const claude = await app.forward({
+      client: "claude",
+      model: "claude-incoming",
+    });
+    assert.deepEqual(codex, {
+      client: "codex",
+      target: "router",
+      model: "second-looking-but-first",
+    });
+    assert.deepEqual(claude, {
+      client: "claude",
+      target: "router",
+      model: "second-looking-but-first",
+    });
+    assert.equal(sent()[0]?.target, "router");
+    assert.equal(sent()[0]?.apiKey, KEY);
+    assert.equal(sent()[1]?.target, "router");
+    assert.equal(sent()[1]?.model, "second-looking-but-first");
+    assert.equal(sent()[1]?.apiKey, KEY);
+    assert.equal(JSON.stringify(codex).includes(KEY), false);
+    assert.equal(JSON.stringify(claude).includes(KEY), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("forwards native Codex to ChatGPT and native Claude to claude.ai without the key", async () => {
+    const { app, sent } = harness(undefined, {
+      codex: { openai_base_url: "https://old.example/v1" },
+      claudeTerminal: { ANTHROPIC_BASE_URL: "https://third.example" },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("native");
+    const codex = await app.forward({ client: "codex", model: "gpt-4.1" });
+    const claude = await app.forward({ client: "claude", model: "claude-sonnet" });
+    assert.deepEqual(codex, {
+      client: "codex",
+      target: "chatgpt",
+      model: "gpt-4.1",
+    });
+    assert.deepEqual(claude, {
+      client: "claude",
+      target: "claude.ai",
+      model: "claude-sonnet",
+    });
+    assert.equal(sent()[0]?.target, "chatgpt");
+    assert.equal(sent()[0]?.model, "gpt-4.1");
+    assert.equal("apiKey" in (sent()[0] ?? {}), false);
+    assert.equal(sent()[1]?.target, "claude.ai");
+    assert.equal("apiKey" in (sent()[1] ?? {}), false);
+    const sentText = JSON.stringify(sent());
+    assert.equal(sentText.includes(KEY), false);
+    assert.equal(sentText.includes("old.example"), false);
+    assert.equal(sentText.includes("third.example"), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("forwards VCRouter to the classroom upstream even when the switch is native", async () => {
+    const { app, sent, proxyReceived } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("native");
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+    assert.deepEqual(sent(), []);
+    await app.copilotRequest("VCRouter");
+    assert.deepEqual(proxyReceived(), ["VCRouter"]);
+    assert.equal(sent()[0]?.client, "copilot");
+    assert.equal(sent()[0]?.target, "router");
+    assert.equal(sent()[0]?.model, "second-looking-but-first");
+    assert.equal(sent()[0]?.apiKey, KEY);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not forward after the proxy stops", async () => {
+    const { app, sent } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.stop();
+    await assert.rejects(() => app.copilotRequest("VCRouter"), (err: unknown) => {
+      assert.equal(String(err).includes(KEY), false);
+      return true;
+    });
+    await assert.rejects(
+      () => app.forward({ client: "codex", model: "gpt-4.1" }),
+      (err: unknown) => {
+        assert.equal(String(err).includes(KEY), false);
+        return true;
+      },
+    );
+    assert.deepEqual(sent(), []);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 
   it("does not stop the proxy when the window closes", async () => {
