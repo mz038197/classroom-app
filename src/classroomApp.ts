@@ -10,12 +10,15 @@ export type NicknameRedeemResult = {
   };
 };
 
+export type ModelSwitchMode = "native" | "classroom";
+
 export type ClassroomAppDeps = {
   router: {
     redeemNickname(body: {
       invite_code: string;
       nickname: string;
     }): Promise<NicknameRedeemResult>;
+    fetchSessionModels(apiKey: string): Promise<string[]>;
   };
   catalog: {
     fetchCourseCatalog(
@@ -69,6 +72,8 @@ export type ClassroomAppView = {
   installNotice?: string;
   catalog?: CourseCatalogView;
   catalogError?: string;
+  mode: ModelSwitchMode;
+  modelId?: string;
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
@@ -83,6 +88,8 @@ export class ClassroomApp {
   private catalog: CourseCatalogView | undefined;
   private catalogError: string | undefined;
   private remoteCatalogHeld = false;
+  private mode: ModelSwitchMode = "native";
+  private modelIds: string[] = [];
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -92,6 +99,7 @@ export class ClassroomApp {
       detail: this.detail,
       canCopyKey: this.connected,
       installAvailable: Boolean(this.projectFolder),
+      mode: this.mode,
     };
     if (this.classLabel) {
       view.classLabel = this.classLabel;
@@ -109,6 +117,9 @@ export class ClassroomApp {
     }
     if (this.catalogError) {
       view.catalogError = this.catalogError;
+    }
+    if (this.mode === "classroom" && this.modelIds[0]) {
+      view.modelId = this.modelIds[0];
     }
     return view;
   }
@@ -143,6 +154,7 @@ export class ClassroomApp {
     this.detail = "Classroom API Key 已設定。";
     this.notice = undefined;
     await this.loadCatalog();
+    await this.loadModels(redeemed.api_key);
   }
 
   async setProjectFolder(folder: string): Promise<void> {
@@ -151,6 +163,42 @@ export class ClassroomApp {
     if (!this.remoteCatalogHeld) {
       await this.loadCatalog();
     }
+  }
+
+  async setSwitch(mode: ModelSwitchMode): Promise<void> {
+    if (mode === "native") {
+      this.mode = "native";
+      return;
+    }
+    const apiKey = await this.deps.storage.getApiKey();
+    if (!apiKey || this.modelIds.length === 0) {
+      this.mode = "native";
+      return;
+    }
+    this.mode = "classroom";
+  }
+
+  async reloadAllowlist(): Promise<void> {
+    const apiKey = await this.deps.storage.getApiKey();
+    if (!apiKey) {
+      return;
+    }
+    await this.loadModels(apiKey);
+  }
+
+  private async loadModels(apiKey: string): Promise<void> {
+    let ids: string[];
+    try {
+      ids = await this.deps.router.fetchSessionModels(apiKey);
+    } catch {
+      return;
+    }
+    if (ids.length === 0) {
+      this.modelIds = [];
+      this.mode = "native";
+      return;
+    }
+    this.modelIds = ids;
   }
 
   async copyKey(): Promise<void> {
@@ -177,6 +225,8 @@ export class ClassroomApp {
     this.catalog = undefined;
     this.catalogError = undefined;
     this.remoteCatalogHeld = false;
+    this.mode = "native";
+    this.modelIds = [];
   }
 
   closeWindow(): void {

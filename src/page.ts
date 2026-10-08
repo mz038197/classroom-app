@@ -71,6 +71,21 @@ export function renderPage(view: ClassroomAppView): string {
   const notice = view.notice
     ? `<p class="notice">${escapeHtml(view.notice)}</p>`
     : "";
+  const current =
+    view.mode === "classroom"
+      ? `Classroom${view.modelId ? ` · ${escapeHtml(view.modelId)}` : ""}`
+      : "Native";
+  const modelSwitch = `<section class="switch">
+      <h2>模型開關</h2>
+      <p>目前：${current}</p>
+      <form method="post" action="/switch">
+        <button type="submit" name="mode" value="classroom">Classroom</button>
+        <button type="submit" name="mode" value="native">Native</button>
+      </form>
+      <form method="post" action="/reload">
+        <button type="submit">重新載入模型</button>
+      </form>
+    </section>`;
   const actions = view.canCopyKey
     ? `<form method="post" action="/copy">
         <button type="submit">複製 Classroom API Key</button>
@@ -136,13 +151,20 @@ export function renderPage(view: ClassroomAppView): string {
       overflow-wrap: anywhere;
       margin: 0;
     }
+    .switch {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      flex-basis: 100%;
+    }
     @media (min-width: 48rem) {
       .connection {
         flex-direction: row;
         flex-wrap: wrap;
         align-items: flex-end;
       }
-      form.redeem {
+      form.redeem,
+      .switch form {
         flex-direction: row;
         flex-wrap: wrap;
         align-items: flex-end;
@@ -162,6 +184,7 @@ export function renderPage(view: ClassroomAppView): string {
       <button type="submit">設定專案資料夾</button>
       ${installNotice}
     </form>
+    ${modelSwitch}
   </main>
   ${catalog}
   <script>
