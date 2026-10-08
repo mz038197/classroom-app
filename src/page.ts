@@ -75,9 +75,13 @@ export function renderPage(view: ClassroomAppView): string {
     view.mode === "classroom"
       ? `Classroom${view.modelId ? ` · ${escapeHtml(view.modelId)}` : ""}`
       : "Native";
+  const restart = view.mustRestart?.includes("vscode")
+    ? `<p class="restart">請完全退出 VS Code 再打開，不要只重載視窗。</p>`
+    : "";
   const modelSwitch = `<section class="switch">
       <h2>模型開關</h2>
       <p>目前：${current}</p>
+      ${restart}
       <form method="post" action="/switch">
         <button type="submit" name="mode" value="classroom">Classroom</button>
         <button type="submit" name="mode" value="native">Native</button>
@@ -151,7 +155,8 @@ export function renderPage(view: ClassroomAppView): string {
       overflow-wrap: anywhere;
       margin: 0;
     }
-    .switch {
+    .switch,
+    .restart {
       display: flex;
       flex-direction: column;
       gap: 0.35rem;

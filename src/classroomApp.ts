@@ -12,6 +12,12 @@ export type NicknameRedeemResult = {
 
 export type ModelSwitchMode = "native" | "classroom";
 
+export type MustRestartClient = "codex" | "claude" | "vscode";
+
+export type CopilotDocument = {
+  providers: Array<Record<string, unknown>>;
+};
+
 export type ClassroomAppDeps = {
   router: {
     redeemNickname(body: {
@@ -37,6 +43,14 @@ export type ClassroomAppDeps = {
     clearApiKey(): Promise<void>;
   };
   stopProcess(): void;
+  proxyBaseUrl: string;
+  copilot: {
+    read(): Promise<CopilotDocument>;
+    write(doc: CopilotDocument): Promise<void>;
+  };
+  proxy: {
+    receive(request: { provider: "VCRouter" }): Promise<void>;
+  };
 };
 
 export type CourseActionView = {
@@ -74,6 +88,7 @@ export type ClassroomAppView = {
   catalogError?: string;
   mode: ModelSwitchMode;
   modelId?: string;
+  mustRestart?: MustRestartClient[];
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
@@ -90,6 +105,8 @@ export class ClassroomApp {
   private remoteCatalogHeld = false;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
+  private proxyRunning = false;
+  private mustRestart: MustRestartClient[] = [];
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -121,7 +138,42 @@ export class ClassroomApp {
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
     }
+    if (this.mustRestart.length > 0) {
+      view.mustRestart = [...this.mustRestart];
+    }
     return view;
+  }
+
+  async start(): Promise<void> {
+    const doc = await this.deps.copilot.read();
+    const providers = Array.isArray(doc.providers) ? doc.providers : [];
+    const already = providers.some((provider) => provider?.name === "VCRouter");
+    if (!already) {
+      await this.deps.copilot.write({
+        providers: [
+          ...providers,
+          { name: "VCRouter", url: this.deps.proxyBaseUrl },
+        ],
+      });
+      if (!this.mustRestart.includes("vscode")) {
+        this.mustRestart.push("vscode");
+      }
+    }
+    this.proxyRunning = true;
+  }
+
+  stop(): void {
+    this.proxyRunning = false;
+  }
+
+  async copilotRequest(selection: string): Promise<void> {
+    if (selection !== "VCRouter") {
+      return;
+    }
+    if (!this.proxyRunning) {
+      throw new Error("VCRouter 目前無法使用。請先啟動 Classroom App。");
+    }
+    await this.deps.proxy.receive({ provider: "VCRouter" });
   }
 
   async redeem(inviteCode: string, nickname: string): Promise<void> {
