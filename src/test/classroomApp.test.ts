@@ -26,11 +26,14 @@ function harness(
     catalogBody?: { course_catalog_yaml?: unknown };
     catalogError?: Error;
     files?: Record<string, string | undefined>;
+    run?: (cwd: string, command: string) => Promise<string>;
+    write?: (path: string, contents: string) => Promise<void>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
   const catalogKeys: string[] = [];
   const fileReads: string[] = [];
+  const runCalls: { cwd: string; command: string }[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
   let clipboardWrites = 0;
@@ -93,6 +96,20 @@ function harness(
         storedKey = undefined;
       },
     },
+    commands: {
+      async run(cwd, command) {
+        runCalls.push({ cwd, command });
+        if (options?.run) {
+          return options.run(cwd, command);
+        }
+        return "ok";
+      },
+    },
+    files: {
+      async write(path, contents) {
+        await options?.write?.(path, contents);
+      },
+    },
     stopProcess() {
       stops += 1;
     },
@@ -106,6 +123,7 @@ function harness(
     stops: () => stops,
     catalogKeys,
     fileReads,
+    runCalls,
     failClipboard(error: Error) {
       clipboardError = error;
     },
@@ -520,6 +538,163 @@ actions:
     assert.equal(view.catalog?.actions[0]?.title, "From B");
     assert.equal(JSON.stringify(view).includes("From A"), false);
     assert.deepEqual(fileReads, ["D:\\one", "D:\\two"]);
+  });
+});
+
+describe("confirm one catalog command", () => {
+  it("prepare puts that action's full command on the view and does not run it", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    const view = app.view();
+    assert.equal(view.pendingCommand, "uv add demo");
+    assert.equal(view.commandRunning, false);
+    assert.equal(runCalls.length, 0);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("confirm runs the pending command", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("cancel clears the pending command and does not run it", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    app.cancel();
+    assert.equal(app.view().pendingCommand, undefined);
+    await app.confirm();
+    assert.equal(runCalls.length, 0);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("runs in the Project Folder with the catalog command unchanged", async () => {
+    const { app, runCalls } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: spaced
+    title: Spaced
+    kind: package
+    command: "echo hello  world"
+`,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("spaced");
+    await app.confirm();
+    assert.deepEqual(runCalls, [
+      { cwd: "D:\\lesson", command: "echo hello  world" },
+    ]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("shows the runner output on the view", async () => {
+    const { app } = harness(undefined, {
+      run: async () => "printed-by-runner\n",
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    const view = app.view();
+    assert.equal(view.commandOutput, "printed-by-runner\n");
+    assert.equal(view.commandRunning, false);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("does not run when no Project Folder is set", async () => {
+    const { app, runCalls } = harness();
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(runCalls.length, 0);
+    assert.equal(app.view().pendingCommand, undefined);
+    assert.equal(app.view().commandOutput, undefined);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("rejects a folder change and a second command while one is running", async () => {
+    let release: (value: string) => void = () => {};
+    const gate = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { app, runCalls, fileReads } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: first
+    title: First
+    kind: skill
+    command: echo first
+  - id: second
+    title: Second
+    kind: skill
+    command: echo second
+`,
+      files: {
+        "D:\\other": `
+actions:
+  - id: other
+    title: Other
+    kind: skill
+    command: echo other
+`,
+      },
+      run: async () => gate,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("first");
+    const running = app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(app.view().commandRunning, true);
+    await app.setProjectFolder("D:\\other");
+    assert.equal(app.view().projectFolder, "D:\\lesson");
+    assert.deepEqual(fileReads, []);
+    app.prepare("second");
+    await app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(app.view().pendingCommand, "echo first");
+    release("still first\n");
+    await running;
+    const view = app.view();
+    assert.equal(view.commandOutput, "still first\n");
+    assert.equal(view.commandRunning, false);
+    assert.equal(view.projectFolder, "D:\\lesson");
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("runs an mcp action as that catalog command and does not write a config file", async () => {
+    const writes: { path: string; contents: string }[] = [];
+    const command =
+      "uvx --from git+https://github.com/mz038197/peas-agent-mcp.git add-vans-mcp";
+    const { app, runCalls } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: add-vans-mcp
+    title: 安裝 MCP
+    kind: mcp
+    command: "${command}"
+`,
+      write: async (path, contents) => {
+        writes.push({ path, contents });
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("add-vans-mcp");
+    assert.equal(runCalls.length, 0);
+    await app.confirm();
+    assert.deepEqual(runCalls, [{ cwd: "D:\\lesson", command }]);
+    assert.deepEqual(writes, []);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 });
 

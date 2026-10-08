@@ -120,6 +120,20 @@ async function redeemNickname(body: {
   return json;
 }
 
+function runCommand(cwd: string, command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+      cwd,
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.on("error", () => reject(new Error("command failed")));
+    child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
+}
+
 function writeClipboard(text: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -205,6 +219,12 @@ async function main(): Promise<void> {
     catalog: { fetchCourseCatalog },
     projectFiles: { readClassroomInstalls },
     clipboard: { write: writeClipboard },
+    commands: { run: runCommand },
+    files: {
+      async write() {
+        throw new Error("Classroom App 不寫 MCP 設定");
+      },
+    },
     storage: createFileStorage(storageFile()),
     stopProcess() {
       // 關視窗不呼叫這裡。之後的停止票才會停代理。
@@ -235,6 +255,22 @@ async function main(): Promise<void> {
       if (req.method === "POST" && url === "/project-folder") {
         const params = new URLSearchParams(await readBody(req));
         await app.setProjectFolder(params.get("project_folder") ?? "");
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/prepare") {
+        const params = new URLSearchParams(await readBody(req));
+        app.prepare(params.get("action_id") ?? "");
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/confirm") {
+        await app.confirm();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/cancel") {
+        app.cancel();
         redirect(res);
         return;
       }
