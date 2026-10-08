@@ -37,6 +37,13 @@ export type ClassroomAppDeps = {
   clipboard: {
     write(text: string): Promise<void>;
   };
+  commands: {
+    run(cwd: string, command: string): Promise<string>;
+  };
+  // 測試注入的寫檔口。核心不呼叫它，MCP 動作只跑 catalog command。
+  files: {
+    write(path: string, contents: string): Promise<void>;
+  };
   storage: {
     getApiKey(): Promise<string | undefined>;
     setApiKey(apiKey: string): Promise<void>;
@@ -86,6 +93,9 @@ export type ClassroomAppView = {
   installNotice?: string;
   catalog?: CourseCatalogView;
   catalogError?: string;
+  pendingCommand?: string;
+  commandOutput?: string;
+  commandRunning: boolean;
   mode: ModelSwitchMode;
   modelId?: string;
   mustRestart?: MustRestartClient[];
@@ -103,6 +113,9 @@ export class ClassroomApp {
   private catalog: CourseCatalogView | undefined;
   private catalogError: string | undefined;
   private remoteCatalogHeld = false;
+  private pendingCommand: string | undefined;
+  private commandOutput: string | undefined;
+  private commandRunning = false;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
   private proxyRunning = false;
@@ -116,6 +129,7 @@ export class ClassroomApp {
       detail: this.detail,
       canCopyKey: this.connected,
       installAvailable: Boolean(this.projectFolder),
+      commandRunning: this.commandRunning,
       mode: this.mode,
     };
     if (this.classLabel) {
@@ -134,6 +148,12 @@ export class ClassroomApp {
     }
     if (this.catalogError) {
       view.catalogError = this.catalogError;
+    }
+    if (this.pendingCommand) {
+      view.pendingCommand = this.pendingCommand;
+    }
+    if (this.commandOutput !== undefined) {
+      view.commandOutput = this.commandOutput;
     }
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
@@ -176,6 +196,42 @@ export class ClassroomApp {
     await this.deps.proxy.receive({ provider: "VCRouter" });
   }
 
+  prepare(actionId: string): void {
+    if (this.commandRunning || !this.projectFolder) {
+      return;
+    }
+    const action = this.catalog?.actions.find((item) => item.id === actionId);
+    if (!action) {
+      return;
+    }
+    this.pendingCommand = action.command;
+    this.commandOutput = undefined;
+  }
+
+  async confirm(): Promise<void> {
+    if (this.commandRunning || !this.projectFolder || !this.pendingCommand) {
+      return;
+    }
+    const cwd = this.projectFolder;
+    const command = this.pendingCommand;
+    this.commandRunning = true;
+    this.commandOutput = undefined;
+    try {
+      this.commandOutput = await this.deps.commands.run(cwd, command);
+    } catch {
+      this.commandOutput = "指令執行失敗。";
+    } finally {
+      this.commandRunning = false;
+    }
+  }
+
+  cancel(): void {
+    if (this.commandRunning) {
+      return;
+    }
+    this.pendingCommand = undefined;
+  }
+
   async redeem(inviteCode: string, nickname: string): Promise<void> {
     const invite = inviteCode.trim();
     const name = nickname.trim();
@@ -210,6 +266,9 @@ export class ClassroomApp {
   }
 
   async setProjectFolder(folder: string): Promise<void> {
+    if (this.commandRunning) {
+      return;
+    }
     const next = folder.trim();
     this.projectFolder = next || undefined;
     if (!this.remoteCatalogHeld) {

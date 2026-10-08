@@ -11,6 +11,7 @@ function view(extra?: Partial<ClassroomAppView>): ClassroomAppView {
     detail: "Classroom API Key 已設定。",
     canCopyKey: true,
     installAvailable: false,
+    commandRunning: false,
     mode: "native",
     ...extra,
   };
