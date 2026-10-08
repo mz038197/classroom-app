@@ -802,6 +802,9 @@ actions:
     assert.equal(app.view().mode, "classroom");
     assert.equal(app.view().modelId, "second-looking-but-first");
     assert.equal(app.view().commandRunning, true);
+    await app.setSwitch("native");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().commandRunning, true);
     await app.setProjectFolder("D:\\other");
     assert.equal(app.view().projectFolder, "D:\\lesson");
     assert.deepEqual(fileReads, []);
