@@ -25,6 +25,53 @@ function storageFile(): string {
   return path.join(root, "classroom-app", "connection.json");
 }
 
+function copilotModelsFile(): string {
+  const roaming = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  return path.join(roaming, "Code", "User", "chatLanguageModels.json");
+}
+
+function isProviderRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+async function readCopilotProviders(): Promise<{
+  providers: Array<Record<string, unknown>>;
+}> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(copilotModelsFile(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { providers: [] };
+    }
+    throw err;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { providers: [] };
+  }
+  const parsed: unknown = JSON.parse(trimmed);
+  if (Array.isArray(parsed)) {
+    return { providers: parsed.filter(isProviderRecord) };
+  }
+  if (isProviderRecord(parsed) && Array.isArray(parsed.providers)) {
+    return { providers: parsed.providers.filter(isProviderRecord) };
+  }
+  throw new Error("Copilot 設定格式無法辨識");
+}
+
+async function writeCopilotProviders(doc: {
+  providers: Array<Record<string, unknown>>;
+}): Promise<void> {
+  const target = copilotModelsFile();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(
+    target,
+    `${JSON.stringify(doc.providers, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function createFileStorage(filePath: string) {
   return {
     async getApiKey(): Promise<string | undefined> {
@@ -173,6 +220,20 @@ async function redeemNickname(body: {
   return json;
 }
 
+function runCommand(cwd: string, command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+      cwd,
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
+    child.on("error", () => reject(new Error("command failed")));
+    child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
+}
+
 function writeClipboard(text: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -258,17 +319,30 @@ async function main(): Promise<void> {
     catalog: { fetchCourseCatalog },
     projectFiles: { readClassroomInstalls },
     clipboard: { write: writeClipboard },
+    commands: { run: runCommand },
+    files: {
+      async write() {
+        throw new Error("Classroom App 不寫 MCP 設定");
+      },
+    },
     storage: createFileStorage(storageFile()),
     stopProcess() {
       // 關視窗不呼叫這裡。停止是頁面上的單獨動作。
     },
     proxyBaseUrl: pageUrl.replace(/\/$/, ""),
     routes: createRouteFiles(routePaths()),
+    copilot: {
+      read: readCopilotProviders,
+      write: writeCopilotProviders,
+    },
     proxy: {
       start() {
-        // 這個行程的 127.0.0.1:47821 就是路由位址。轉送請求留給之後的票。
+        // 這個行程的 127.0.0.1:47821 就是路由位址。轉送留給之後的票。
       },
       stop() {},
+      async receive() {
+        // 選了 VCRouter 才進這裡。轉送留給之後的票。
+      },
     },
   });
   await app.start();
@@ -297,6 +371,22 @@ async function main(): Promise<void> {
       if (req.method === "POST" && url === "/project-folder") {
         const params = new URLSearchParams(await readBody(req));
         await app.setProjectFolder(params.get("project_folder") ?? "");
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/prepare") {
+        const params = new URLSearchParams(await readBody(req));
+        app.prepare(params.get("action_id") ?? "");
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/confirm") {
+        await app.confirm();
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/cancel") {
+        app.cancel();
         redirect(res);
         return;
       }
@@ -348,6 +438,9 @@ async function main(): Promise<void> {
     process.exit(1);
   });
   server.listen(port, "127.0.0.1", () => {
+    void app.start().catch(() => {
+      process.stderr.write("無法寫入 VCRouter。\n");
+    });
     const tray = openTray(pageUrl);
     openBrowser(pageUrl);
     const shutdown = () => {

@@ -12,6 +12,12 @@ export type NicknameRedeemResult = {
 
 export type ModelSwitchMode = "native" | "classroom";
 
+export type MustRestartClient = "codex" | "claude" | "vscode";
+
+export type CopilotDocument = {
+  providers: Array<Record<string, unknown>>;
+};
+
 export type ClassroomAppDeps = {
   router: {
     redeemNickname(body: {
@@ -31,6 +37,13 @@ export type ClassroomAppDeps = {
   clipboard: {
     write(text: string): Promise<void>;
   };
+  commands: {
+    run(cwd: string, command: string): Promise<string>;
+  };
+  // 測試注入的寫檔口。核心不呼叫它，MCP 動作只跑 catalog command。
+  files: {
+    write(path: string, contents: string): Promise<void>;
+  };
   storage: {
     getApiKey(): Promise<string | undefined>;
     setApiKey(apiKey: string): Promise<void>;
@@ -46,9 +59,14 @@ export type ClassroomAppDeps = {
     readVsCodeClaude(): Promise<Record<string, unknown>>;
     writeVsCodeClaude(doc: Record<string, unknown>): Promise<void>;
   };
+  copilot: {
+    read(): Promise<CopilotDocument>;
+    write(doc: CopilotDocument): Promise<void>;
+  };
   proxy: {
     start(): void;
     stop(): void;
+    receive(request: { provider: "VCRouter" }): Promise<void>;
   };
 };
 
@@ -85,9 +103,12 @@ export type ClassroomAppView = {
   installNotice?: string;
   catalog?: CourseCatalogView;
   catalogError?: string;
+  pendingCommand?: string;
+  commandOutput?: string;
+  commandRunning: boolean;
   mode: ModelSwitchMode;
   modelId?: string;
-  mustRestart?: Array<"codex" | "claude" | "vscode">;
+  mustRestart?: MustRestartClient[];
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
@@ -102,9 +123,13 @@ export class ClassroomApp {
   private catalog: CourseCatalogView | undefined;
   private catalogError: string | undefined;
   private remoteCatalogHeld = false;
+  private pendingCommand: string | undefined;
+  private commandOutput: string | undefined;
+  private commandRunning = false;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
-  private mustRestart: Array<"codex" | "claude" | "vscode"> | undefined;
+  private proxyRunning = false;
+  private mustRestart: MustRestartClient[] = [];
   private routeRestartNoted = false;
 
   constructor(private readonly deps: ClassroomAppDeps) {}
@@ -115,6 +140,7 @@ export class ClassroomApp {
       detail: this.detail,
       canCopyKey: this.connected,
       installAvailable: Boolean(this.projectFolder),
+      commandRunning: this.commandRunning,
       mode: this.mode,
     };
     if (this.classLabel) {
@@ -134,13 +160,65 @@ export class ClassroomApp {
     if (this.catalogError) {
       view.catalogError = this.catalogError;
     }
+    if (this.pendingCommand) {
+      view.pendingCommand = this.pendingCommand;
+    }
+    if (this.commandOutput !== undefined) {
+      view.commandOutput = this.commandOutput;
+    }
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
     }
-    if (this.mustRestart) {
-      view.mustRestart = this.mustRestart;
+    if (this.mustRestart.length > 0) {
+      view.mustRestart = [...this.mustRestart];
     }
     return view;
+  }
+
+  async copilotRequest(selection: string): Promise<void> {
+    if (selection !== "VCRouter") {
+      return;
+    }
+    if (!this.proxyRunning) {
+      throw new Error("VCRouter 目前無法使用。請先啟動 Classroom App。");
+    }
+    await this.deps.proxy.receive({ provider: "VCRouter" });
+  }
+
+  prepare(actionId: string): void {
+    if (this.commandRunning || !this.projectFolder) {
+      return;
+    }
+    const action = this.catalog?.actions.find((item) => item.id === actionId);
+    if (!action) {
+      return;
+    }
+    this.pendingCommand = action.command;
+    this.commandOutput = undefined;
+  }
+
+  async confirm(): Promise<void> {
+    if (this.commandRunning || !this.projectFolder || !this.pendingCommand) {
+      return;
+    }
+    const cwd = this.projectFolder;
+    const command = this.pendingCommand;
+    this.commandRunning = true;
+    this.commandOutput = undefined;
+    try {
+      this.commandOutput = await this.deps.commands.run(cwd, command);
+    } catch {
+      this.commandOutput = "指令執行失敗。";
+    } finally {
+      this.commandRunning = false;
+    }
+  }
+
+  cancel(): void {
+    if (this.commandRunning) {
+      return;
+    }
+    this.pendingCommand = undefined;
   }
 
   async redeem(inviteCode: string, nickname: string): Promise<void> {
@@ -177,6 +255,9 @@ export class ClassroomApp {
   }
 
   async setProjectFolder(folder: string): Promise<void> {
+    if (this.commandRunning) {
+      return;
+    }
     const next = folder.trim();
     this.projectFolder = next || undefined;
     if (!this.remoteCatalogHeld) {
@@ -264,17 +345,32 @@ export class ClassroomApp {
       ANTHROPIC_BASE_URL: url,
     });
     await this.deps.routes.writeVsCodeClaude(withVsCodeBaseUrl(vsCode, url));
+    const doc = await this.deps.copilot.read();
+    const providers = Array.isArray(doc.providers) ? doc.providers : [];
+    const already = providers.some((provider) => provider?.name === "VCRouter");
     this.deps.proxy.start();
+    this.proxyRunning = true;
     if (hosts.length > 0) {
       this.notice = `路由原先指向 ${hosts.join("、")}。`;
     }
     if (!this.routeRestartNoted) {
-      this.mustRestart = ["codex", "claude"];
+      this.noteRestart("codex");
+      this.noteRestart("claude");
       this.routeRestartNoted = true;
+    }
+    if (!already) {
+      await this.deps.copilot.write({
+        providers: [
+          ...providers,
+          { name: "VCRouter", url },
+        ],
+      });
+      this.noteRestart("vscode");
     }
   }
 
   async stop(): Promise<void> {
+    this.proxyRunning = false;
     this.deps.proxy.stop();
     const codex = await this.deps.routes.readCodex();
     const claude = await this.deps.routes.readClaudeTerminal();
@@ -284,6 +380,12 @@ export class ClassroomApp {
       withoutKey(claude, "ANTHROPIC_BASE_URL"),
     );
     await this.deps.routes.writeVsCodeClaude(withoutVsCodeBaseUrl(vsCode));
+  }
+
+  private noteRestart(client: MustRestartClient): void {
+    if (!this.mustRestart.includes(client)) {
+      this.mustRestart.push(client);
+    }
   }
 
   closeWindow(): void {

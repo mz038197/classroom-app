@@ -27,16 +27,23 @@ function harness(
     catalogBody?: { course_catalog_yaml?: unknown };
     catalogError?: Error;
     files?: Record<string, string | undefined>;
+    run?: (cwd: string, command: string) => Promise<string>;
+    write?: (path: string, contents: string) => Promise<void>;
     sessionModels?: (apiKey: string) => Promise<string[]>;
     codex?: Record<string, unknown>;
     claudeTerminal?: Record<string, unknown>;
     vsCode?: Record<string, unknown>;
+    providers?: Array<Record<string, unknown>>;
   },
 ) {
   const redeemCalls: { invite_code: string; nickname: string }[] = [];
   const catalogKeys: string[] = [];
   const fileReads: string[] = [];
+  const runCalls: { cwd: string; command: string }[] = [];
   const modelKeys: string[] = [];
+  let providers = structuredClone(options?.providers ?? []);
+  const copilotWrites: { providers: Array<Record<string, unknown>> }[] = [];
+  const proxyReceived: string[] = [];
   let storedKey: string | undefined;
   let clipboard = "";
   let clipboardWrites = 0;
@@ -114,6 +121,20 @@ function harness(
         storedKey = undefined;
       },
     },
+    commands: {
+      async run(cwd, command) {
+        runCalls.push({ cwd, command });
+        if (options?.run) {
+          return options.run(cwd, command);
+        }
+        return "ok";
+      },
+    },
+    files: {
+      async write(path, contents) {
+        await options?.write?.(path, contents);
+      },
+    },
     stopProcess() {
       stops += 1;
     },
@@ -141,12 +162,24 @@ function harness(
         docs.vsCode = doc;
       },
     },
+    copilot: {
+      async read() {
+        return { providers: structuredClone(providers) };
+      },
+      async write(doc) {
+        copilotWrites.push(structuredClone(doc));
+        providers = structuredClone(doc.providers);
+      },
+    },
     proxy: {
       start() {
         proxyStarts += 1;
       },
       stop() {
         proxyStops += 1;
+      },
+      async receive(request) {
+        proxyReceived.push(request.provider);
       },
     },
   });
@@ -164,6 +197,10 @@ function harness(
     routeWrites,
     catalogKeys,
     fileReads,
+    copilotWrites: () => copilotWrites,
+    copilotProviders: () => structuredClone(providers),
+    proxyReceived: () => [...proxyReceived],
+    runCalls,
     failClipboard(error: Error) {
       clipboardError = error;
     },
@@ -803,8 +840,7 @@ describe("route addresses", () => {
   it("asks the student to fully quit Codex and Claude Code the first time a route is written", async () => {
     const { app } = harness();
     await app.start();
-    assert.deepEqual(app.view().mustRestart, ["codex", "claude"]);
-    assert.equal(JSON.stringify(app.view()).includes("vscode"), false);
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude", "vscode"]);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 
@@ -881,7 +917,7 @@ describe("route addresses", () => {
     ]);
     assert.equal(app.view().mode, "classroom");
     assert.equal(app.view().modelId, "second-looking-but-first");
-    assert.deepEqual(app.view().mustRestart, ["codex", "claude"]);
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude", "vscode"]);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 
@@ -902,6 +938,170 @@ describe("route addresses", () => {
       ANTHROPIC_API_KEY: "sk-ant-keep",
     });
     assert.equal(JSON.stringify(docs).includes("claude.example"), false);
+  });
+});
+
+describe("confirm one catalog command", () => {
+  it("prepare puts that action's full command on the view and does not run it", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    const view = app.view();
+    assert.equal(view.pendingCommand, "uv add demo");
+    assert.equal(view.commandRunning, false);
+    assert.equal(runCalls.length, 0);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("confirm runs the pending command", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("cancel clears the pending command and does not run it", async () => {
+    const { app, runCalls } = harness();
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    app.cancel();
+    assert.equal(app.view().pendingCommand, undefined);
+    await app.confirm();
+    assert.equal(runCalls.length, 0);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("runs in the Project Folder with the catalog command unchanged", async () => {
+    const { app, runCalls } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: spaced
+    title: Spaced
+    kind: package
+    command: "echo hello  world"
+`,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("spaced");
+    await app.confirm();
+    assert.deepEqual(runCalls, [
+      { cwd: "D:\\lesson", command: "echo hello  world" },
+    ]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("shows the runner output on the view", async () => {
+    const { app } = harness(undefined, {
+      run: async () => "printed-by-runner\n",
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    const view = app.view();
+    assert.equal(view.commandOutput, "printed-by-runner\n");
+    assert.equal(view.commandRunning, false);
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("does not run when no Project Folder is set", async () => {
+    const { app, runCalls } = harness();
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(runCalls.length, 0);
+    assert.equal(app.view().pendingCommand, undefined);
+    assert.equal(app.view().commandOutput, undefined);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("rejects a folder change and a second command while one is running", async () => {
+    let release: (value: string) => void = () => {};
+    const gate = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const { app, runCalls, fileReads } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: first
+    title: First
+    kind: skill
+    command: echo first
+  - id: second
+    title: Second
+    kind: skill
+    command: echo second
+`,
+      files: {
+        "D:\\other": `
+actions:
+  - id: other
+    title: Other
+    kind: skill
+    command: echo other
+`,
+      },
+      run: async () => gate,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("first");
+    const running = app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(app.view().commandRunning, true);
+    await app.setSwitch("classroom");
+    assert.equal(app.view().mode, "classroom");
+    assert.equal(app.view().modelId, "second-looking-but-first");
+    assert.equal(app.view().commandRunning, true);
+    await app.setSwitch("native");
+    assert.equal(app.view().mode, "native");
+    assert.equal(app.view().commandRunning, true);
+    await app.setProjectFolder("D:\\other");
+    assert.equal(app.view().projectFolder, "D:\\lesson");
+    assert.deepEqual(fileReads, []);
+    app.prepare("second");
+    await app.confirm();
+    assert.equal(runCalls.length, 1);
+    assert.equal(app.view().pendingCommand, "echo first");
+    release("still first\n");
+    await running;
+    const view = app.view();
+    assert.equal(view.commandOutput, "still first\n");
+    assert.equal(view.commandRunning, false);
+    assert.equal(view.projectFolder, "D:\\lesson");
+    assert.equal(JSON.stringify(view).includes(KEY), false);
+  });
+
+  it("runs an mcp action as that catalog command and does not write a config file", async () => {
+    const writes: { path: string; contents: string }[] = [];
+    const command =
+      "uvx --from git+https://github.com/mz038197/peas-agent-mcp.git add-vans-mcp";
+    const { app, runCalls } = harness(undefined, {
+      catalogYaml: `
+actions:
+  - id: add-vans-mcp
+    title: 安裝 MCP
+    kind: mcp
+    command: "${command}"
+`,
+      write: async (path, contents) => {
+        writes.push({ path, contents });
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("add-vans-mcp");
+    assert.equal(runCalls.length, 0);
+    await app.confirm();
+    assert.deepEqual(runCalls, [{ cwd: "D:\\lesson", command }]);
+    assert.deepEqual(writes, []);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 });
 
@@ -936,6 +1136,126 @@ describe("close window", () => {
     assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);
     assert.equal(docs.claudeTerminal.ANTHROPIC_API_KEY, "sk-ant-keep");
     assert.equal(app.view().connected, false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+});
+
+describe("VCRouter", () => {
+  it("appends one VCRouter addressed at the local proxy and leaves other providers unchanged", async () => {
+    const openRouter = {
+      name: "OpenRouter",
+      vendor: "openrouter",
+      apiKey: "keep-me",
+      models: [{ id: "keep-or", name: "keep-or" }],
+    };
+    const { app, copilotWrites, storedKey } = harness(undefined, {
+      providers: [openRouter],
+    });
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(storedKey(), KEY);
+    await app.start();
+    assert.equal(copilotWrites().length, 1);
+    const written = copilotWrites()[0];
+    assert.deepEqual(written?.providers[0], openRouter);
+    assert.deepEqual(written?.providers[1], {
+      name: "VCRouter",
+      url: "http://127.0.0.1:47821",
+    });
+    assert.equal(written?.providers.length, 2);
+    assert.equal(Object.hasOwn(written?.providers[1] ?? {}, "apiKey"), false);
+    assert.equal(JSON.stringify(written).includes(KEY), false);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("asks for a full VS Code restart only when VCRouter is inserted", async () => {
+    const { app } = harness(undefined, {
+      providers: [{ name: "OpenRouter", apiKey: "keep-me" }],
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude", "vscode"]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not write when VCRouter is already present", async () => {
+    const existing = [
+      { name: "OpenRouter", apiKey: "keep-me" },
+      {
+        name: "VCRouter",
+        url: "http://127.0.0.1:9",
+        models: [{ id: "leave-me" }],
+      },
+    ];
+    const { app, copilotWrites } = harness(undefined, { providers: existing });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.setSwitch("native");
+    assert.equal(copilotWrites().length, 0);
+    assert.deepEqual(app.view().mustRestart, ["codex", "claude"]);
+    assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("does not add or remove providers when the switch changes after the first insert", async () => {
+    const { app, copilotWrites, copilotProviders } = harness(undefined, {
+      providers: [{ name: "OpenRouter", apiKey: "keep-me" }],
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    const afterInsert = copilotProviders();
+    await app.setSwitch("classroom");
+    await app.setSwitch("native");
+    assert.deepEqual(copilotProviders(), afterInsert);
+    assert.equal(copilotWrites().length, 1);
+    assert.equal(
+      afterInsert.filter((provider) => provider.name === "VCRouter").length,
+      1,
+    );
+    assert.equal(
+      afterInsert.some((provider) => provider.name === "OpenRouter"),
+      true,
+    );
+  });
+
+  it("refuses VCRouter while the proxy is stopped and never sends Native into it", async () => {
+    const { app, proxyReceived } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+    await app.stop();
+    await assert.rejects(() => app.copilotRequest("VCRouter"), (err: unknown) => {
+      assert.equal(String(err).includes(KEY), false);
+      return true;
+    });
+    assert.deepEqual(proxyReceived(), []);
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+  });
+
+  it("accepts VCRouter after start again and still skips Native", async () => {
+    const { app, proxyReceived, copilotProviders } = harness();
+    await app.start();
+    await app.stop();
+    assert.equal(
+      copilotProviders().some((provider) => provider.name === "VCRouter"),
+      true,
+    );
+    await app.start();
+    await app.copilotRequest("native");
+    assert.deepEqual(proxyReceived(), []);
+    await app.copilotRequest("VCRouter");
+    assert.deepEqual(proxyReceived(), ["VCRouter"]);
+  });
+
+  it("does not stop the proxy when the window closes", async () => {
+    const { app, stops, proxyReceived } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    app.closeWindow();
+    assert.equal(stops(), 0);
+    await app.copilotRequest("VCRouter");
+    assert.deepEqual(proxyReceived(), ["VCRouter"]);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
   });
 });
