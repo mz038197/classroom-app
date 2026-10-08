@@ -13,6 +13,12 @@ function view(extra?: Partial<ClassroomAppView>): ClassroomAppView {
     installAvailable: false,
     commandRunning: false,
     mode: "native",
+    tools: [
+      { id: "uv", label: "uv", installed: false, selected: false },
+      { id: "git", label: "git", installed: false, selected: false },
+      { id: "node", label: "Node.js", installed: false, selected: false },
+      { id: "pwsh", label: "PowerShell 7", installed: false, selected: false },
+    ],
     ...extra,
   };
 }

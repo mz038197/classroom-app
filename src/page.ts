@@ -48,7 +48,7 @@ function renderAction(action: CourseActionView, commandRunning: boolean): string
 
 function renderCommand(view: ClassroomAppView): string {
   const hasOutput = view.commandOutput !== undefined;
-  if (!view.pendingCommand && !hasOutput && !view.commandRunning) {
+  if (!view.pendingCommand && !hasOutput) {
     return "";
   }
   const command = view.pendingCommand
@@ -77,6 +77,32 @@ function renderCommand(view: ClassroomAppView): string {
     ${running}
     ${choices}
     ${output}
+  </section>`;
+}
+
+function renderEnvironment(view: ClassroomAppView): string {
+  const locked = view.commandRunning ? " disabled" : "";
+  const confirmDisabled =
+    view.installAvailable && !view.commandRunning ? "" : " disabled";
+  const tools = view.tools
+    .map((tool) => {
+      const checked = tool.selected ? " checked" : "";
+      return `<label><input type="checkbox" name="tool" value="${escapeHtml(tool.id)}"${checked}${locked}> ${escapeHtml(tool.label)}</label>`;
+    })
+    .join("");
+  const notice = view.environmentNotice
+    ? `<p class="environment-notice">${escapeHtml(view.environmentNotice)}</p>`
+    : "";
+  return `<section class="environment">
+    <h2>環境工具</h2>
+    <form method="post" action="/environment-check">
+      <button type="submit"${locked}>重新檢查</button>
+    </form>
+    <form method="post" action="/environment">
+      ${tools}
+      <button type="submit"${confirmDisabled}>確認安裝</button>
+    </form>
+    ${notice}
   </section>`;
 }
 
@@ -181,6 +207,7 @@ export function renderPage(view: ClassroomAppView): string {
     : "";
   const catalog = renderCatalog(view);
   const command = renderCommand(view);
+  const environment = renderEnvironment(view);
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -242,8 +269,33 @@ export function renderPage(view: ClassroomAppView): string {
     .restart {
       display: flex;
       flex-direction: column;
-      gap: 0.35rem;
+      gap: 0.5rem;
       flex-basis: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .environment,
+    .environment form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      flex-basis: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .environment label {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .environment input[type="checkbox"] {
+      width: 1.25rem;
+      min-width: 1.25rem;
+      min-height: 1.25rem;
+      flex: 0 0 auto;
     }
     .stop {
       display: flex;
@@ -285,6 +337,7 @@ export function renderPage(view: ClassroomAppView): string {
     </form>
     ${modelSwitch}
     ${stop}
+    ${environment}
   </main>
   ${command}
   ${catalog}

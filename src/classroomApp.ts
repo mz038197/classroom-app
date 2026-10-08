@@ -12,6 +12,22 @@ export type NicknameRedeemResult = {
 
 export type ModelSwitchMode = "native" | "classroom";
 
+export type EnvironmentToolId = "uv" | "git" | "node" | "pwsh";
+
+const ENVIRONMENT_TOOLS: readonly EnvironmentToolId[] = [
+  "uv",
+  "git",
+  "node",
+  "pwsh",
+];
+
+const ENVIRONMENT_LABEL: Record<EnvironmentToolId, string> = {
+  uv: "uv",
+  git: "git",
+  node: "Node.js",
+  pwsh: "PowerShell 7",
+};
+
 export type MustRestartClient = "codex" | "claude" | "vscode";
 
 export type CopilotDocument = {
@@ -39,6 +55,13 @@ export type ClassroomAppDeps = {
   };
   commands: {
     run(cwd: string, command: string): Promise<string>;
+  };
+  environment: {
+    probe(tool: EnvironmentToolId): Promise<{ installed: boolean }>;
+    install(
+      tool: EnvironmentToolId,
+      cwd: string,
+    ): Promise<{ exitCode: number | undefined; output: string }>;
   };
   // 測試注入的寫檔口。核心不呼叫它，MCP 動作只跑 catalog command。
   files: {
@@ -92,6 +115,13 @@ export type CourseCatalogView = {
   localNote?: string;
 };
 
+export type EnvironmentToolView = {
+  id: EnvironmentToolId;
+  label: string;
+  installed: boolean;
+  selected: boolean;
+};
+
 export type ClassroomAppView = {
   connected: boolean;
   classLabel?: string;
@@ -108,11 +138,15 @@ export type ClassroomAppView = {
   commandRunning: boolean;
   mode: ModelSwitchMode;
   modelId?: string;
+  tools: EnvironmentToolView[];
+  environmentNotice?: string;
   mustRestart?: MustRestartClient[];
 };
 
 const LOCAL_LIST_NOTE = "這是本機清單。";
 const INSTALL_UNAVAILABLE = "尚未指定專案資料夾，安裝不可用。";
+const REOPEN_TERMINAL = "請重開終端機再重新檢查。";
+const ALREADY_INSTALLED = /xcode-select:[\s\S]*already installed/i;
 
 export class ClassroomApp {
   private connected = false;
@@ -128,6 +162,14 @@ export class ClassroomApp {
   private commandRunning = false;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
+  private environmentInstalled: Record<EnvironmentToolId, boolean> = {
+    uv: false,
+    git: false,
+    node: false,
+    pwsh: false,
+  };
+  private environmentSelected = new Set<EnvironmentToolId>();
+  private environmentNotice: string | undefined;
   private proxyRunning = false;
   private mustRestart: MustRestartClient[] = [];
   private routeRestartNoted = false;
@@ -142,6 +184,7 @@ export class ClassroomApp {
       installAvailable: Boolean(this.projectFolder),
       commandRunning: this.commandRunning,
       mode: this.mode,
+      tools: this.environmentTools(),
     };
     if (this.classLabel) {
       view.classLabel = this.classLabel;
@@ -169,10 +212,81 @@ export class ClassroomApp {
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
     }
+    if (this.environmentNotice) {
+      view.environmentNotice = this.environmentNotice;
+    }
     if (this.mustRestart.length > 0) {
       view.mustRestart = [...this.mustRestart];
     }
     return view;
+  }
+
+  async checkEnvironment(): Promise<void> {
+    if (this.commandRunning) {
+      return;
+    }
+    for (const tool of ENVIRONMENT_TOOLS) {
+      let installed = false;
+      try {
+        installed = (await this.deps.environment.probe(tool)).installed;
+      } catch {
+        installed = false;
+      }
+      this.environmentInstalled[tool] = installed;
+    }
+  }
+
+  selectEnvironment(tools: readonly EnvironmentToolId[]): void {
+    if (this.commandRunning) {
+      return;
+    }
+    this.environmentSelected = new Set(
+      ENVIRONMENT_TOOLS.filter((id) => tools.includes(id)),
+    );
+  }
+
+  async confirmEnvironment(): Promise<void> {
+    if (this.commandRunning || !this.projectFolder) {
+      return;
+    }
+    const selected = ENVIRONMENT_TOOLS.filter((id) =>
+      this.environmentSelected.has(id),
+    );
+    if (selected.length === 0) {
+      return;
+    }
+    const cwd = this.projectFolder;
+    this.commandRunning = true;
+    this.environmentNotice = undefined;
+    let succeeded = false;
+    try {
+      for (const tool of selected) {
+        let result: { exitCode: number | undefined; output: string };
+        try {
+          result = await this.deps.environment.install(tool, cwd);
+        } catch {
+          break;
+        }
+        if (!environmentInstallSucceeded(result)) {
+          break;
+        }
+        succeeded = true;
+      }
+    } finally {
+      this.commandRunning = false;
+    }
+    if (succeeded) {
+      this.environmentNotice = REOPEN_TERMINAL;
+    }
+  }
+
+  private environmentTools(): EnvironmentToolView[] {
+    return ENVIRONMENT_TOOLS.map((id) => ({
+      id,
+      label: ENVIRONMENT_LABEL[id],
+      installed: this.environmentInstalled[id],
+      selected: this.environmentSelected.has(id),
+    }));
   }
 
   async copilotRequest(selection: string): Promise<void> {
@@ -566,6 +680,16 @@ function withVsCodeBaseUrl(
     ...doc,
     [VS_CODE_ENV]: [{ name: "ANTHROPIC_BASE_URL", value: url }],
   };
+}
+
+function environmentInstallSucceeded(result: {
+  exitCode: number | undefined;
+  output: string;
+}): boolean {
+  if (result.exitCode === 0) {
+    return true;
+  }
+  return ALREADY_INSTALLED.test(result.output);
 }
 
 function catalogView(
