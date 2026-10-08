@@ -8,12 +8,15 @@ export type NicknameRedeemResult = {
   };
 };
 
+export type ModelSwitchMode = "native" | "classroom";
+
 export type ClassroomAppDeps = {
   router: {
     redeemNickname(body: {
       invite_code: string;
       nickname: string;
     }): Promise<NicknameRedeemResult>;
+    fetchSessionModels(apiKey: string): Promise<string[]>;
   };
   clipboard: {
     write(text: string): Promise<void>;
@@ -32,6 +35,8 @@ export type ClassroomAppView = {
   detail: string;
   canCopyKey: boolean;
   notice?: string;
+  mode: ModelSwitchMode;
+  modelId?: string;
 };
 
 export class ClassroomApp {
@@ -39,6 +44,8 @@ export class ClassroomApp {
   private classLabel: string | undefined;
   private detail = "";
   private notice: string | undefined;
+  private mode: ModelSwitchMode = "native";
+  private modelIds: string[] = [];
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -47,12 +54,16 @@ export class ClassroomApp {
       connected: this.connected,
       detail: this.detail,
       canCopyKey: this.connected,
+      mode: this.mode,
     };
     if (this.classLabel) {
       view.classLabel = this.classLabel;
     }
     if (this.notice) {
       view.notice = this.notice;
+    }
+    if (this.mode === "classroom" && this.modelIds[0]) {
+      view.modelId = this.modelIds[0];
     }
     return view;
   }
@@ -86,6 +97,43 @@ export class ClassroomApp {
     this.connected = true;
     this.detail = "Classroom API Key 已設定。";
     this.notice = undefined;
+    await this.loadModels(redeemed.api_key);
+  }
+
+  async setSwitch(mode: ModelSwitchMode): Promise<void> {
+    if (mode === "native") {
+      this.mode = "native";
+      return;
+    }
+    const apiKey = await this.deps.storage.getApiKey();
+    if (!apiKey || this.modelIds.length === 0) {
+      this.mode = "native";
+      return;
+    }
+    this.mode = "classroom";
+  }
+
+  async reloadAllowlist(): Promise<void> {
+    const apiKey = await this.deps.storage.getApiKey();
+    if (!apiKey) {
+      return;
+    }
+    await this.loadModels(apiKey);
+  }
+
+  private async loadModels(apiKey: string): Promise<void> {
+    let ids: string[];
+    try {
+      ids = await this.deps.router.fetchSessionModels(apiKey);
+    } catch {
+      return;
+    }
+    if (ids.length === 0) {
+      this.modelIds = [];
+      this.mode = "native";
+      return;
+    }
+    this.modelIds = ids;
   }
 
   async copyKey(): Promise<void> {
@@ -109,6 +157,8 @@ export class ClassroomApp {
     this.classLabel = undefined;
     this.detail = "";
     this.notice = undefined;
+    this.mode = "native";
+    this.modelIds = [];
   }
 
   closeWindow(): void {
