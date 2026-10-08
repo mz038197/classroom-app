@@ -1,4 +1,56 @@
-import type { ClassroomAppView } from "./classroomApp";
+import type { ClassroomAppView, CourseActionView, CourseSnippetView } from "./classroomApp";
+import { actionKindLabel } from "./courseCatalog";
+
+function renderCatalog(view: ClassroomAppView): string {
+  if (!view.catalog && !view.catalogError) {
+    return "";
+  }
+  const error = view.catalogError
+    ? `<p class="catalog-error">${escapeHtml(view.catalogError)}</p>`
+    : "";
+  const note = view.catalog?.localNote
+    ? `<p class="local-note">${escapeHtml(view.catalog.localNote)}</p>`
+    : "";
+  const actions = (view.catalog?.actions ?? [])
+    .map((action) => renderAction(action))
+    .join("");
+  const snippets = view.catalog?.snippets
+    ? `<section class="snippets">
+        <h2>本課片段</h2>
+        ${view.catalog.snippets.map((snippet) => renderSnippet(snippet)).join("")}
+      </section>`
+    : "";
+  return `<section class="catalog">
+    <h2>課程清單</h2>
+    ${note}
+    ${error}
+    ${actions}
+    ${snippets}
+  </section>`;
+}
+
+function renderAction(action: CourseActionView): string {
+  const description = action.description
+    ? `<p>${escapeHtml(action.description)}</p>`
+    : "";
+  return `<article class="action">
+    <h3>${escapeHtml(action.title)}</h3>
+    <p class="kind">${escapeHtml(actionKindLabel(action.kind))}</p>
+    ${description}
+    <code>${escapeHtml(action.command)}</code>
+  </article>`;
+}
+
+function renderSnippet(snippet: CourseSnippetView): string {
+  const hint = snippet.pasteHint
+    ? `<p class="paste-hint">${escapeHtml(snippet.pasteHint)}</p>`
+    : "";
+  return `<article class="snippet">
+    <h3>${escapeHtml(snippet.title)}</h3>
+    ${hint}
+    <pre>${escapeHtml(snippet.body)}</pre>
+  </article>`;
+}
 
 function escapeHtml(value: string): string {
   return value
@@ -31,6 +83,11 @@ export function renderPage(view: ClassroomAppView): string {
         <label>課堂暱稱 <input name="nickname" autocomplete="off"></label>
         <button type="submit">連線</button>
       </form>`;
+  const folderValue = view.projectFolder ? ` value="${escapeHtml(view.projectFolder)}"` : "";
+  const installNotice = view.installNotice
+    ? `<p class="install-notice">${escapeHtml(view.installNotice)}</p>`
+    : "";
+  const catalog = renderCatalog(view);
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -58,6 +115,26 @@ export function renderPage(view: ClassroomAppView): string {
     input, button {
       font: inherit;
       min-height: 2.75rem;
+      max-width: 100%;
+    }
+    .folder,
+    .catalog,
+    .action,
+    .snippet {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      min-width: 0;
+    }
+    .action,
+    .snippet {
+      padding: 0.75rem 0;
+      border-top: 1px solid #ccc;
+    }
+    pre, code {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 0;
     }
     @media (min-width: 48rem) {
       .connection {
@@ -80,7 +157,13 @@ export function renderPage(view: ClassroomAppView): string {
     ${detail}
     ${notice}
     ${actions}
+    <form class="folder" method="post" action="/project-folder">
+      <label>專案資料夾 <input name="project_folder" autocomplete="off"${folderValue}></label>
+      <button type="submit">設定專案資料夾</button>
+      ${installNotice}
+    </form>
   </main>
+  ${catalog}
   <script>
     window.addEventListener("pagehide", function () {
       navigator.sendBeacon("/close");

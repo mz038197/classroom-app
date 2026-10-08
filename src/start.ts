@@ -53,6 +53,42 @@ function isRedeemResult(value: unknown): value is NicknameRedeemResult {
   );
 }
 
+async function fetchCourseCatalog(
+  apiKey: string,
+): Promise<{ course_catalog_yaml?: unknown }> {
+  const root = (
+    process.env.CLASSROOM_ROUTER_BASE_URL ?? "https://ai.vanscoding.com"
+  ).replace(/\/+$/, "");
+  const response = await fetch(`${root}/extension/course-catalog`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error("course catalog failed");
+  }
+  const json: unknown = await response.json();
+  if (!json || typeof json !== "object") {
+    throw new Error("course catalog failed");
+  }
+  return json as { course_catalog_yaml?: unknown };
+}
+
+async function readClassroomInstalls(
+  folder: string,
+): Promise<string | undefined> {
+  try {
+    return await fs.readFile(
+      path.join(folder, "classroom-installs.yaml"),
+      "utf8",
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 async function redeemNickname(body: {
   invite_code: string;
   nickname: string;
@@ -166,6 +202,8 @@ function openTray(url: string): ChildProcess {
 async function main(): Promise<void> {
   const app = new ClassroomApp({
     router: { redeemNickname },
+    catalog: { fetchCourseCatalog },
+    projectFiles: { readClassroomInstalls },
     clipboard: { write: writeClipboard },
     storage: createFileStorage(storageFile()),
     stopProcess() {
@@ -191,6 +229,12 @@ async function main(): Promise<void> {
           params.get("invite_code") ?? "",
           params.get("nickname") ?? "",
         );
+        redirect(res);
+        return;
+      }
+      if (req.method === "POST" && url === "/project-folder") {
+        const params = new URLSearchParams(await readBody(req));
+        await app.setProjectFolder(params.get("project_folder") ?? "");
         redirect(res);
         return;
       }
