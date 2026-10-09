@@ -189,6 +189,7 @@ function harness(
         routeWrites.vsCode += 1;
         docs.vsCode = doc;
       },
+      async setModelOptions() {},
     },
     copilot: {
       async read() {
@@ -455,6 +456,107 @@ describe("Model Switch", () => {
     await app.redeem("ABC12345", "Ada");
     assert.equal(app.view().mode, "classroom");
     assert.equal(app.view().modelId, "fresh-session-first");
+  });
+
+  it("sends an allowlist id the client picked and substitutes the first id once", async () => {
+    const { app } = harness();
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    const picked = await app.forward({ client: "codex", model: "later" });
+    const foreign = await app.forward({
+      client: "claude",
+      model: "claude-incoming",
+    });
+    assert.equal(picked.model, "later");
+    assert.equal(foreign.model, "second-looking-but-first");
+    assert.equal(
+      app.view().notice,
+      "正在用的模型不在清單裡，已改送第一個。",
+    );
+    await app.forward({ client: "claude", model: "claude-incoming" });
+    assert.equal(
+      app.view().notice,
+      "正在用的模型不在清單裡，已改送第一個。",
+    );
+    await app.forward({ client: "claude", model: "later" });
+    assert.equal(app.view().notice, undefined);
+  });
+
+  it("keeps a client on an id that survives the new allowlist", async () => {
+    let call = 0;
+    const { app } = harness(undefined, {
+      async sessionModels() {
+        call += 1;
+        if (call === 1) {
+          return ["second-looking-but-first", "later"];
+        }
+        return ["fresh", "later", "second-looking-but-first"];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.forward({ client: "codex", model: "later" });
+    await app.reloadAllowlist();
+    assert.equal(app.view().notice, undefined);
+    assert.equal(app.view().modelId, "fresh");
+    const kept = await app.forward({ client: "codex", model: "later" });
+    assert.equal(kept.model, "later");
+  });
+
+  it("says once when the id a client was sending leaves the allowlist", async () => {
+    let call = 0;
+    const { app } = harness(undefined, {
+      async sessionModels() {
+        call += 1;
+        if (call === 1) {
+          return ["second-looking-but-first", "later"];
+        }
+        return ["fresh"];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.forward({ client: "codex", model: "later" });
+    await app.reloadAllowlist();
+    assert.equal(app.view().notice, "正在用的模型不在清單裡，已改送第一個。");
+    assert.equal(app.view().modelId, "fresh");
+    await app.reloadAllowlist();
+    assert.equal(app.view().notice, "正在用的模型不在清單裡，已改送第一個。");
+    const sent = await app.forward({ client: "codex", model: "later" });
+    assert.equal(sent.model, "fresh");
+    await app.forward({ client: "codex", model: "fresh" });
+    await app.forward({ client: "claude", model: "fresh" });
+    await app.forward({ client: "copilot", model: "fresh" });
+    assert.equal(app.view().notice, undefined);
+  });
+
+  it("drops the substitution note when the list changes or the switch returns Native", async () => {
+    let call = 0;
+    const { app } = harness(undefined, {
+      async sessionModels() {
+        call += 1;
+        if (call === 1) {
+          return ["second-looking-but-first", "later"];
+        }
+        return ["second-looking-but-first", "later", "extra"];
+      },
+    });
+    await app.redeem("ABC12345", "Ada");
+    await app.start();
+    await app.setSwitch("classroom");
+    await app.forward({ client: "codex", model: "gpt-incoming" });
+    assert.equal(app.view().notice, "正在用的模型不在清單裡，已改送第一個。");
+    await app.reloadAllowlist();
+    assert.equal(app.view().notice, undefined);
+    await app.forward({ client: "claude", model: "gpt-incoming" });
+    await app.setSwitch("native");
+    assert.equal(app.view().notice, undefined);
+    await app.setSwitch("classroom");
+    const picked = await app.forward({ client: "codex", model: "later" });
+    assert.equal(picked.model, "later");
   });
 
   it("keeps the previous Classroom id when reload throws", async () => {

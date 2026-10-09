@@ -89,7 +89,15 @@ export type RouteFilePaths = {
   vsCode: string;
 };
 
+export type ModelOptions = {
+  ids: string[];
+  codexModel: string;
+  claudeModel: string;
+  proxyBaseUrl: string;
+};
+
 export function createRouteFiles(paths: RouteFilePaths) {
+  let backup: ModelBackup | undefined;
   return {
     async readCodex(): Promise<Record<string, unknown>> {
       const url = readTomlString(await readText(paths.codex), "openai_base_url");
@@ -146,7 +154,142 @@ export function createRouteFiles(paths: RouteFilePaths) {
       );
       await writeText(paths.vsCode, next);
     },
+    async setModelOptions(options: ModelOptions | null): Promise<void> {
+      if (!options) {
+        await restoreModelOptions(paths, backup);
+        backup = undefined;
+        return;
+      }
+      if (!backup) {
+        backup = await captureModelBackup(paths);
+      }
+      const models = options.ids.map((id, index) => catalogEntry(id, index + 1));
+      const catalogPath = path.join(path.dirname(paths.codex), "classroom-catalog.json");
+      await writeText(catalogPath, `${JSON.stringify({ models }, null, 2)}\n`);
+      await writeText(
+        path.join(path.dirname(paths.codex), "models_cache.json"),
+        `${JSON.stringify(
+          {
+            fetched_at: "2000-01-01T00:00:00Z",
+            client_version: "0.0.0",
+            models,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      let toml = await readText(paths.codex);
+      toml = upsertTomlString(toml, "model_catalog_json", catalogPath);
+      toml = upsertTomlString(toml, "model", options.codexModel);
+      await writeText(paths.codex, toml);
+      await writeClaudeModel(paths.claude, options.claudeModel);
+      await writeText(
+        gatewayCachePath(paths.claude),
+        `${JSON.stringify({
+          baseUrl: options.proxyBaseUrl,
+          fetchedAt: 0,
+          models: options.ids.map((id) => ({ id, display_name: id })),
+        })}\n`,
+      );
+    },
   };
+}
+
+type ModelBackup = {
+  codexModel?: string;
+  catalogPath?: string;
+  modelsCache?: string;
+  claudeModel?: string;
+  hadClaudeModel: boolean;
+  gateway?: string;
+};
+
+function gatewayCachePath(claudeSettings: string): string {
+  return path.join(path.dirname(claudeSettings), "cache", "gateway-models.json");
+}
+
+function catalogEntry(id: string, priority: number): Record<string, unknown> {
+  return {
+    slug: id,
+    display_name: id,
+    description: id,
+    visibility: "list",
+    supported_in_api: true,
+    priority,
+    shell_type: "shell_command",
+    default_reasoning_level: "medium",
+    supported_reasoning_levels: [
+      {
+        effort: "medium",
+        description: "Balances speed and reasoning depth for everyday tasks",
+      },
+    ],
+  };
+}
+
+async function readOptional(file: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(file, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+async function captureModelBackup(paths: RouteFilePaths): Promise<ModelBackup> {
+  const toml = await readText(paths.codex);
+  const claude = parseJsonObject(await readText(paths.claude)) ?? {};
+  return {
+    codexModel: readTomlString(toml, "model"),
+    catalogPath: readTomlString(toml, "model_catalog_json"),
+    modelsCache: await readOptional(
+      path.join(path.dirname(paths.codex), "models_cache.json"),
+    ),
+    claudeModel: typeof claude.model === "string" ? claude.model : undefined,
+    hadClaudeModel: Object.hasOwn(claude, "model"),
+    gateway: await readOptional(gatewayCachePath(paths.claude)),
+  };
+}
+
+async function writeClaudeModel(file: string, model: string): Promise<void> {
+  const current = parseJsonObject(await readText(file)) ?? {};
+  current.model = model;
+  await writeText(file, `${JSON.stringify(current, null, 2)}\n`);
+}
+
+async function restoreModelOptions(
+  paths: RouteFilePaths,
+  backup: ModelBackup | undefined,
+): Promise<void> {
+  if (!backup) {
+    return;
+  }
+  let toml = await readText(paths.codex);
+  toml = backup.catalogPath
+    ? upsertTomlString(toml, "model_catalog_json", backup.catalogPath)
+    : removeTomlKey(toml, "model_catalog_json");
+  toml = backup.codexModel
+    ? upsertTomlString(toml, "model", backup.codexModel)
+    : removeTomlKey(toml, "model");
+  await writeText(paths.codex, toml);
+  const cachePath = path.join(path.dirname(paths.codex), "models_cache.json");
+  if (backup.modelsCache === undefined) {
+    await fs.rm(cachePath, { force: true });
+  } else {
+    await writeText(cachePath, backup.modelsCache);
+  }
+  const claude = parseJsonObject(await readText(paths.claude)) ?? {};
+  if (backup.hadClaudeModel) {
+    claude.model = backup.claudeModel;
+  } else {
+    delete claude.model;
+  }
+  await writeText(paths.claude, `${JSON.stringify(claude, null, 2)}\n`);
+  const gateway = gatewayCachePath(paths.claude);
+  if (backup.gateway === undefined) {
+    await fs.rm(gateway, { force: true });
+  } else {
+    await writeText(gateway, backup.gateway);
+  }
 }
 
 async function readText(file: string): Promise<string> {

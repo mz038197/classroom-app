@@ -8,6 +8,7 @@ import {
   anthropicBaseValues,
   withVsCodeBaseUrl,
   withoutVsCodeBaseUrl,
+  type ModelOptions,
 } from "./routeFiles";
 
 export type NicknameRedeemResult = {
@@ -86,6 +87,7 @@ export type ClassroomAppDeps = {
     writeClaudeTerminal(doc: Record<string, unknown>): Promise<void>;
     readVsCodeClaude(): Promise<Record<string, unknown>>;
     writeVsCodeClaude(doc: Record<string, unknown>): Promise<void>;
+    setModelOptions(options: ModelOptions | null): Promise<void>;
   };
   copilot: {
     read(): Promise<CopilotDocument>;
@@ -165,6 +167,8 @@ export type ClassroomAppView = {
 const LOCAL_LIST_NOTE = "這是本機清單。";
 const INSTALL_UNAVAILABLE = "尚未指定專案資料夾，安裝不可用。";
 const REOPEN_TERMINAL = "請重開終端機再重新檢查。";
+const MODEL_SUBSTITUTED = "正在用的模型不在清單裡，已改送第一個。";
+const PROXY_CLIENTS: ProxyClient[] = ["codex", "claude", "copilot"];
 export class ClassroomApp {
   private connected = false;
   private classLabel: string | undefined;
@@ -190,6 +194,8 @@ export class ClassroomApp {
   private proxyRunning = false;
   private mustRestart: MustRestartClient[] = [];
   private routeRestartNoted = false;
+  private sending = new Map<ProxyClient, string>();
+  private modelNotice = new Set<ProxyClient>();
 
   constructor(private readonly deps: ClassroomAppDeps) {}
 
@@ -206,8 +212,9 @@ export class ClassroomApp {
     if (this.classLabel) {
       view.classLabel = this.classLabel;
     }
-    if (this.notice) {
-      view.notice = this.notice;
+    const notice = this.visibleNotice();
+    if (notice) {
+      view.notice = notice;
     }
     if (this.projectFolder) {
       view.projectFolder = this.projectFolder;
@@ -331,7 +338,7 @@ export class ClassroomApp {
     }
     if (request.client === "copilot") {
       await this.deps.proxy.receive({ provider: "VCRouter" });
-      const upstream = await this.classroomUpstream("copilot");
+      const upstream = await this.classroomUpstream("copilot", request.model);
       if (!upstream) {
         throw new Error("沒有上課模型。");
       }
@@ -339,7 +346,7 @@ export class ClassroomApp {
       return forwardedRecord(upstream);
     }
     if (this.mode === "classroom") {
-      const upstream = await this.classroomUpstream(request.client);
+      const upstream = await this.classroomUpstream(request.client, request.model);
       if (!upstream) {
         throw new Error("沒有上課模型。");
       }
@@ -359,13 +366,69 @@ export class ClassroomApp {
 
   private async classroomUpstream(
     client: ProxyClient,
+    requested?: string,
   ): Promise<UpstreamSend | undefined> {
     const apiKey = await this.deps.storage.getApiKey();
-    const model = this.modelIds[0];
+    const model = this.classroomModel(client, requested);
     if (!apiKey || !model) {
       return undefined;
     }
     return { client, target: "router", model, apiKey };
+  }
+
+  private classroomModel(
+    client: ProxyClient,
+    requested: string | undefined,
+  ): string | undefined {
+    const first = this.modelIds[0];
+    if (!first) {
+      return undefined;
+    }
+    if (requested && this.modelIds.includes(requested)) {
+      this.sending.set(client, requested);
+      this.modelNotice.delete(client);
+      return requested;
+    }
+    if (requested && !this.modelIds.includes(requested)) {
+      this.modelNotice.add(client);
+      return first;
+    }
+    return this.sending.get(client) ?? first;
+  }
+
+  private visibleNotice(): string | undefined {
+    const parts: string[] = [];
+    if (this.notice) {
+      parts.push(this.notice);
+    }
+    if (this.modelNotice.size > 0) {
+      parts.push(MODEL_SUBSTITUTED);
+    }
+    return parts.length > 0 ? parts.join(" ") : undefined;
+  }
+
+  private forgetModelChoices(): void {
+    this.sending.clear();
+    this.modelNotice.clear();
+  }
+
+  private async publishModelOptions(): Promise<void> {
+    const first = this.modelIds[0];
+    if (!first || this.mode !== "classroom") {
+      await this.restoreModelOptions();
+      return;
+    }
+    const options: ModelOptions = {
+      ids: [...this.modelIds],
+      codexModel: this.sending.get("codex") ?? first,
+      claudeModel: this.sending.get("claude") ?? first,
+      proxyBaseUrl: this.deps.proxyBaseUrl,
+    };
+    await this.deps.routes.setModelOptions(options);
+  }
+
+  private async restoreModelOptions(): Promise<void> {
+    await this.deps.routes.setModelOptions(null);
   }
 
   prepare(actionId: string): void {
@@ -451,14 +514,23 @@ export class ClassroomApp {
   async setSwitch(mode: ModelSwitchMode): Promise<void> {
     if (mode === "native") {
       this.mode = "native";
+      this.forgetModelChoices();
+      await this.restoreModelOptions();
       return;
     }
     const apiKey = await this.deps.storage.getApiKey();
     if (!apiKey || this.modelIds.length === 0) {
       this.mode = "native";
+      this.forgetModelChoices();
+      await this.restoreModelOptions();
       return;
     }
+    const entering = this.mode !== "classroom";
     this.mode = "classroom";
+    if (entering) {
+      this.forgetModelChoices();
+    }
+    await this.publishModelOptions();
   }
 
   async reloadCatalog(): Promise<void> {
@@ -483,9 +555,31 @@ export class ClassroomApp {
     if (ids.length === 0) {
       this.modelIds = [];
       this.mode = "native";
+      this.forgetModelChoices();
+      await this.restoreModelOptions();
       return;
     }
+    const previous = this.modelIds;
+    const changed = previous.join("\0") !== ids.join("\0");
+    if (changed) {
+      this.modelNotice.clear();
+    }
     this.modelIds = ids;
+    if (!changed || this.mode !== "classroom") {
+      return;
+    }
+    for (const client of PROXY_CLIENTS) {
+      const current = this.sending.get(client) ?? previous[0];
+      if (current && ids.includes(current)) {
+        this.sending.set(client, current);
+        continue;
+      }
+      this.sending.delete(client);
+      if (current) {
+        this.modelNotice.add(client);
+      }
+    }
+    await this.publishModelOptions();
   }
 
   async copyKey(): Promise<void> {
@@ -514,6 +608,8 @@ export class ClassroomApp {
     this.remoteCatalogHeld = false;
     this.mode = "native";
     this.modelIds = [];
+    this.forgetModelChoices();
+    await this.restoreModelOptions();
   }
 
   async start(): Promise<void> {
@@ -545,6 +641,9 @@ export class ClassroomApp {
       this.noteRestart("claude");
       this.routeRestartNoted = true;
     }
+    if (this.mode === "classroom") {
+      await this.publishModelOptions();
+    }
     if (!already) {
       await this.deps.copilot.write({
         providers: [
@@ -567,6 +666,7 @@ export class ClassroomApp {
       withoutKey(claude, "ANTHROPIC_BASE_URL"),
     );
     await this.deps.routes.writeVsCodeClaude(withoutVsCodeBaseUrl(vsCode));
+    await this.restoreModelOptions();
   }
 
   private noteRestart(client: MustRestartClient): void {

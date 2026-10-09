@@ -126,4 +126,93 @@ describe("route files", () => {
     assert.equal(written.includes('"OTHER"'), true);
     assert.equal(written.includes("claude.example"), false);
   });
+
+  it("publishes the allowlist as the Codex and Claude pickers, then restores", async () => {
+    const { routes, paths, root } = await tempRoutes();
+    await fs.writeFile(
+      paths.codex,
+      'model = "gpt-5.6-luna"\nmodel_catalog_json = "native.json"\ntrust = "always"\n',
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(root, "models_cache.json"),
+      '{"fetched_at":"2026-01-01T00:00:00Z","models":[{"slug":"gpt-5.6-luna"}]}\n',
+      "utf8",
+    );
+    await fs.writeFile(
+      paths.claude,
+      JSON.stringify({ theme: "dark", model: "claude-sonnet" }),
+      "utf8",
+    );
+    await fs.mkdir(path.join(root, "cache"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "cache", "gateway-models.json"),
+      '{"baseUrl":"https://api.anthropic.com","models":[{"id":"claude-sonnet"}]}\n',
+      "utf8",
+    );
+    await routes.setModelOptions({
+      ids: ["ollama_cloud@minimax-m3:cloud", "later"],
+      codexModel: "ollama_cloud@minimax-m3:cloud",
+      claudeModel: "later",
+      proxyBaseUrl: PROXY,
+    });
+    const toml = await fs.readFile(paths.codex, "utf8");
+    assert.equal(toml.includes('trust = "always"'), true);
+    assert.equal(toml.includes('model = "ollama_cloud@minimax-m3:cloud"'), true);
+    assert.equal(toml.includes("classroom-catalog.json"), true);
+    assert.equal(toml.includes("native.json"), false);
+    const catalog = JSON.parse(
+      await fs.readFile(path.join(root, "classroom-catalog.json"), "utf8"),
+    ) as { models: Array<{ slug: string; visibility: string }> };
+    assert.deepEqual(
+      catalog.models.map((model) => model.slug),
+      ["ollama_cloud@minimax-m3:cloud", "later"],
+    );
+    assert.equal(catalog.models[0]?.visibility, "list");
+    const cache = JSON.parse(
+      await fs.readFile(path.join(root, "models_cache.json"), "utf8"),
+    ) as { fetched_at: string; models: Array<{ slug: string }> };
+    assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
+    assert.deepEqual(
+      cache.models.map((model) => model.slug),
+      ["ollama_cloud@minimax-m3:cloud", "later"],
+    );
+    const claude = JSON.parse(await fs.readFile(paths.claude, "utf8")) as {
+      theme: string;
+      model: string;
+    };
+    assert.equal(claude.theme, "dark");
+    assert.equal(claude.model, "later");
+    const gateway = JSON.parse(
+      await fs.readFile(path.join(root, "cache", "gateway-models.json"), "utf8"),
+    ) as { baseUrl: string; models: Array<{ id: string }> };
+    assert.equal(gateway.baseUrl, PROXY);
+    assert.deepEqual(
+      gateway.models.map((model) => model.id),
+      ["ollama_cloud@minimax-m3:cloud", "later"],
+    );
+    await routes.setModelOptions(null);
+    const restored = await fs.readFile(paths.codex, "utf8");
+    assert.equal(restored.includes('model = "gpt-5.6-luna"'), true);
+    assert.equal(restored.includes('model_catalog_json = "native.json"'), true);
+    assert.equal(restored.includes("classroom-catalog.json"), false);
+    assert.equal(restored.includes('trust = "always"'), true);
+    const restoredCache = await fs.readFile(
+      path.join(root, "models_cache.json"),
+      "utf8",
+    );
+    assert.equal(restoredCache.includes("gpt-5.6-luna"), true);
+    assert.equal(restoredCache.includes("2000-01-01"), false);
+    const restoredClaude = JSON.parse(await fs.readFile(paths.claude, "utf8")) as {
+      model: string;
+      theme: string;
+    };
+    assert.equal(restoredClaude.model, "claude-sonnet");
+    assert.equal(restoredClaude.theme, "dark");
+    const restoredGateway = await fs.readFile(
+      path.join(root, "cache", "gateway-models.json"),
+      "utf8",
+    );
+    assert.equal(restoredGateway.includes("api.anthropic.com"), true);
+  });
 });
