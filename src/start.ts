@@ -16,6 +16,7 @@ import {
   type UpstreamTarget,
 } from "./classroomApp";
 import { renderPage } from "./page";
+import { isPrototypeVariant, renderPrototypePage } from "./pagePrototype";
 import { createRouteFiles } from "./routeFiles";
 
 const port = 47821;
@@ -402,8 +403,9 @@ function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
   });
 }
 
-function redirect(res: http.ServerResponse): void {
-  res.writeHead(303, { Location: "/" });
+function redirect(res: http.ServerResponse, variant?: string): void {
+  const location = isPrototypeVariant(variant ?? null) ? `/?variant=${variant}` : "/";
+  res.writeHead(303, { Location: location });
   res.end();
 }
 
@@ -590,11 +592,19 @@ async function main(): Promise<void> {
   });
   await app.start();
 
+  const prototyping = process.env.NODE_ENV !== "production";
   const server = http.createServer(async (req, res) => {
+    const parsed = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+    const pathname = parsed.pathname;
+    const variantParam = parsed.searchParams.get("variant");
+    const goHome = () => {
+      redirect(res, prototyping && isPrototypeVariant(variantParam) ? variantParam : undefined);
+    };
     try {
-      const url = req.url ?? "/";
-      if (req.method === "GET" && (url === "/" || url === "/index.html")) {
-        const html = renderPage(app.view());
+      if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+        const html = prototyping
+          ? renderPrototypePage(app.view(), variantParam)
+          : renderPage(app.view());
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
@@ -602,78 +612,86 @@ async function main(): Promise<void> {
         res.end(html);
         return;
       }
-      if (req.method === "POST" && url === "/redeem") {
+      if (req.method === "GET" && pathname === "/brand-logo.png") {
+        const bytes = await fs.readFile(path.join(__dirname, "..", "media", "brand-logo.png"));
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Cache-Control": "no-store",
+        });
+        res.end(bytes);
+        return;
+      }
+      if (req.method === "POST" && pathname === "/redeem") {
         const params = new URLSearchParams(await readBody(req));
         await app.redeem(
           params.get("invite_code") ?? "",
           params.get("nickname") ?? "",
         );
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/project-folder") {
+      if (req.method === "POST" && pathname === "/project-folder") {
         const params = new URLSearchParams(await readBody(req));
         await app.setProjectFolder(params.get("project_folder") ?? "");
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/prepare") {
+      if (req.method === "POST" && pathname === "/prepare") {
         const params = new URLSearchParams(await readBody(req));
         app.prepare(params.get("action_id") ?? "");
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/confirm") {
+      if (req.method === "POST" && pathname === "/confirm") {
         await app.confirm();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/cancel") {
+      if (req.method === "POST" && pathname === "/cancel") {
         app.cancel();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/environment-check") {
+      if (req.method === "POST" && pathname === "/environment-check") {
         await app.checkEnvironment();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/environment") {
+      if (req.method === "POST" && pathname === "/environment") {
         const params = new URLSearchParams(await readBody(req));
         const tools = params
           .getAll("tool")
           .filter((value): value is EnvironmentToolId => isEnvironmentTool(value));
         app.selectEnvironment(tools);
         await app.confirmEnvironment();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/copy") {
+      if (req.method === "POST" && pathname === "/copy") {
         await app.copyKey();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/clear") {
+      if (req.method === "POST" && pathname === "/clear") {
         await app.clearConnection();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/switch") {
+      if (req.method === "POST" && pathname === "/switch") {
         const params = new URLSearchParams(await readBody(req));
         const mode = params.get("mode");
         if (mode === "classroom" || mode === "native") {
           await app.setSwitch(mode);
         }
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/reload") {
+      if (req.method === "POST" && pathname === "/reload") {
         await app.reloadCatalog();
         await app.reloadAllowlist();
-        redirect(res);
+        goHome();
         return;
       }
-      const pathname = url.split("?")[0] ?? "/";
       if (
         (req.method === "POST" || req.method === "PUT") &&
         (pathname.startsWith("/v1/") || pathname.startsWith("/backend-api/"))
@@ -695,12 +713,12 @@ async function main(): Promise<void> {
         res.end(slot.body);
         return;
       }
-      if (req.method === "POST" && url === "/stop") {
+      if (req.method === "POST" && pathname === "/stop") {
         await app.stop();
-        redirect(res);
+        goHome();
         return;
       }
-      if (req.method === "POST" && url === "/close") {
+      if (req.method === "POST" && pathname === "/close") {
         app.closeWindow();
         res.writeHead(204);
         res.end();
@@ -722,8 +740,9 @@ async function main(): Promise<void> {
     void app.start().catch(() => {
       process.stderr.write("無法寫入 VCRouter。\n");
     });
-    const tray = process.platform === "win32" ? openTray(pageUrl) : undefined;
-    openBrowser(pageUrl);
+    const home = prototyping ? `${pageUrl}?variant=A` : pageUrl;
+    const tray = process.platform === "win32" ? openTray(home) : undefined;
+    openBrowser(home);
     const shutdown = () => {
       tray?.kill();
       server.close();
@@ -731,7 +750,7 @@ async function main(): Promise<void> {
     };
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
-    process.stdout.write(`Classroom App: ${pageUrl}\n`);
+    process.stdout.write(`Classroom App: ${home}\n`);
   });
 }
 
