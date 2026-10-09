@@ -39,10 +39,21 @@ describe("Classroom App page", () => {
     assert.equal(html.includes(KEY), false);
   });
 
-  it("stacks the page in a column before the wide breakpoint", () => {
+  it("stacks modules in one column before the wide breakpoint", () => {
     const html = renderPage(view());
-    assert.match(html, /\.connection\s*\{[^}]*flex-direction:\s*column/);
-    assert.match(html, /\.switch\s*,\s*\.restart\s*\{[^}]*flex-direction:\s*column/);
-    assert.match(html, /@media \(min-width:\s*48rem\)/);
+    assert.match(
+      html,
+      /@media \(max-width:\s*40rem\)\s*\{[^}]*grid-template-columns:\s*1fr\s*;/,
+    );
+  });
+
+  it("uses one appearance button and keeps the key off the page", () => {
+    const html = renderPage(view());
+    assert.match(html, /凡思課堂安裝/);
+    assert.match(html, /data-appearance-toggle/);
+    assert.match(html, /\[data-appearance="light"\]/);
+    assert.match(html, /\[data-appearance="dark"\]/);
+    assert.equal(html.includes("proto-bar"), false);
+    assert.equal(html.includes(KEY), false);
   });
 });

@@ -16,7 +16,6 @@ import {
   type UpstreamTarget,
 } from "./classroomApp";
 import { renderPage } from "./page";
-import { isPrototypeVariant, renderPrototypePage } from "./pagePrototype";
 import { createRouteFiles } from "./routeFiles";
 import { decodeRequestBody, ResponsesSse, responsesToChatBody, toolKindsFromResponses } from "./responsesChat";
 
@@ -417,9 +416,8 @@ function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
   });
 }
 
-function redirect(res: http.ServerResponse, variant?: string): void {
-  const location = isPrototypeVariant(variant ?? null) ? `/?variant=${variant}` : "/";
-  res.writeHead(303, { Location: location });
+function redirect(res: http.ServerResponse): void {
+  res.writeHead(303, { Location: "/" });
   res.end();
 }
 
@@ -652,19 +650,15 @@ async function main(): Promise<void> {
   });
   await app.start();
 
-  const prototyping = process.env.NODE_ENV !== "production";
   const server = http.createServer(async (req, res) => {
     const parsed = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
     const pathname = parsed.pathname;
-    const variantParam = parsed.searchParams.get("variant");
     const goHome = () => {
-      redirect(res, prototyping && isPrototypeVariant(variantParam) ? variantParam : undefined);
+      redirect(res);
     };
     try {
       if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-        const html = prototyping
-          ? renderPrototypePage(app.view(), variantParam)
-          : renderPage(app.view());
+        const html = renderPage(app.view());
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
@@ -808,7 +802,7 @@ async function main(): Promise<void> {
     void app.start().catch(() => {
       process.stderr.write("無法寫入 VCRouter。\n");
     });
-    const home = prototyping ? `${pageUrl}?variant=A` : pageUrl;
+    const home = pageUrl;
     const tray = process.platform === "win32" ? openTray(home) : undefined;
     openBrowser(home);
     const shutdown = () => {
