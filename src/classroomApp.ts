@@ -146,6 +146,9 @@ export type EnvironmentToolView = {
 export type ClassroomAppView = {
   connected: boolean;
   classLabel?: string;
+  nickname?: string;
+  courseTitle?: string;
+  sessionTitle?: string;
   detail: string;
   canCopyKey: boolean;
   notice?: string;
@@ -172,6 +175,9 @@ const PROXY_CLIENTS: ProxyClient[] = ["codex", "claude", "copilot"];
 export class ClassroomApp {
   private connected = false;
   private classLabel: string | undefined;
+  private nickname: string | undefined;
+  private courseTitle: string | undefined;
+  private sessionTitle: string | undefined;
   private detail = "";
   private notice: string | undefined;
   private projectFolder: string | undefined;
@@ -211,6 +217,15 @@ export class ClassroomApp {
     };
     if (this.classLabel) {
       view.classLabel = this.classLabel;
+    }
+    if (this.nickname) {
+      view.nickname = this.nickname;
+    }
+    if (this.courseTitle) {
+      view.courseTitle = this.courseTitle;
+    }
+    if (this.sessionTitle) {
+      view.sessionTitle = this.sessionTitle;
     }
     const notice = this.visibleNotice();
     if (notice) {
@@ -497,6 +512,9 @@ export class ClassroomApp {
       .filter(Boolean)
       .join(" · ");
     this.classLabel = label || undefined;
+    this.nickname = name;
+    this.courseTitle = redeemed.session.class_name || undefined;
+    this.sessionTitle = redeemed.session.name || undefined;
     this.connected = true;
     this.detail = "Classroom API Key 已設定。";
     this.notice = undefined;
@@ -602,6 +620,9 @@ export class ClassroomApp {
     await this.deps.storage.clearApiKey();
     this.connected = false;
     this.classLabel = undefined;
+    this.nickname = undefined;
+    this.courseTitle = undefined;
+    this.sessionTitle = undefined;
     this.detail = "";
     this.notice = undefined;
     this.catalog = undefined;

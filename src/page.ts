@@ -509,6 +509,20 @@ function appearanceScript(): string {
   `;
 }
 
+export function classroomBlocks(view: ClassroomAppView) {
+  return {
+    status: statusWord(view),
+    notices: notices(view),
+    connect: connectInner(view),
+    folder: folderInner(view),
+    model: modelInner(view),
+    environment: environmentInner(view),
+    command: commandInner(view),
+    catalog: catalogTable(view),
+    stop: stopForm(),
+  };
+}
+
 export function renderPage(view: ClassroomAppView): string {
   return `<!DOCTYPE html>
 <html lang="zh-Hant">

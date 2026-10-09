@@ -271,6 +271,9 @@ describe("Classroom App redeem", () => {
     const view = app.view();
     assert.equal(view.connected, true);
     assert.equal(view.classLabel, "Demo · Week 1");
+    assert.equal(view.nickname, "Ada");
+    assert.equal(view.courseTitle, "Demo");
+    assert.equal(view.sessionTitle, "Week 1");
     assert.equal(view.detail, "Classroom API Key 已設定。");
     assert.equal(view.canCopyKey, true);
     assert.equal(storedKey(), KEY);
@@ -353,6 +356,9 @@ describe("Clear Classroom Connection", () => {
     assert.equal(view.connected, false);
     assert.equal(view.canCopyKey, false);
     assert.equal(view.classLabel, undefined);
+    assert.equal(view.nickname, undefined);
+    assert.equal(view.courseTitle, undefined);
+    assert.equal(view.sessionTitle, undefined);
     assert.equal(view.notice, undefined);
     assert.equal(storedKey(), undefined);
     assert.equal(view.catalog, undefined);
