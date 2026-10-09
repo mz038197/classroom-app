@@ -569,15 +569,12 @@ export class ClassroomApp {
       return;
     }
     for (const client of PROXY_CLIENTS) {
-      const current = this.sending.get(client) ?? previous[0];
-      if (current && ids.includes(current)) {
-        this.sending.set(client, current);
+      const current = this.sending.get(client);
+      if (!current || ids.includes(current)) {
         continue;
       }
       this.sending.delete(client);
-      if (current) {
-        this.modelNotice.add(client);
-      }
+      this.modelNotice.add(client);
     }
     await this.publishModelOptions();
   }
@@ -643,6 +640,8 @@ export class ClassroomApp {
     }
     if (this.mode === "classroom") {
       await this.publishModelOptions();
+    } else {
+      await this.restoreModelOptions();
     }
     if (!already) {
       await this.deps.copilot.write({

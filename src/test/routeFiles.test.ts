@@ -141,7 +141,12 @@ describe("route files", () => {
     );
     await fs.writeFile(
       paths.claude,
-      JSON.stringify({ theme: "dark", model: "claude-sonnet" }),
+      `{
+  // keep claude
+  "theme": "dark",
+  "model": "claude-sonnet"
+}
+`,
       "utf8",
     );
     await fs.mkdir(path.join(root, "cache"), { recursive: true });
@@ -177,12 +182,10 @@ describe("route files", () => {
       cache.models.map((model) => model.slug),
       ["ollama_cloud@minimax-m3:cloud", "later"],
     );
-    const claude = JSON.parse(await fs.readFile(paths.claude, "utf8")) as {
-      theme: string;
-      model: string;
-    };
-    assert.equal(claude.theme, "dark");
-    assert.equal(claude.model, "later");
+    const claude = await fs.readFile(paths.claude, "utf8");
+    assert.equal(claude.includes("// keep claude"), true);
+    assert.equal(claude.includes('"theme": "dark"'), true);
+    assert.equal(claude.includes('"model": "later"'), true);
     const gateway = JSON.parse(
       await fs.readFile(path.join(root, "cache", "gateway-models.json"), "utf8"),
     ) as { baseUrl: string; models: Array<{ id: string }> };
@@ -191,7 +194,8 @@ describe("route files", () => {
       gateway.models.map((model) => model.id),
       ["ollama_cloud@minimax-m3:cloud", "later"],
     );
-    await routes.setModelOptions(null);
+    const reopened = createRouteFiles(paths);
+    await reopened.setModelOptions(null);
     const restored = await fs.readFile(paths.codex, "utf8");
     assert.equal(restored.includes('model = "gpt-5.6-luna"'), true);
     assert.equal(restored.includes('model_catalog_json = "native.json"'), true);
@@ -203,12 +207,10 @@ describe("route files", () => {
     );
     assert.equal(restoredCache.includes("gpt-5.6-luna"), true);
     assert.equal(restoredCache.includes("2000-01-01"), false);
-    const restoredClaude = JSON.parse(await fs.readFile(paths.claude, "utf8")) as {
-      model: string;
-      theme: string;
-    };
-    assert.equal(restoredClaude.model, "claude-sonnet");
-    assert.equal(restoredClaude.theme, "dark");
+    const restoredClaude = await fs.readFile(paths.claude, "utf8");
+    assert.equal(restoredClaude.includes("// keep claude"), true);
+    assert.equal(restoredClaude.includes('"model": "claude-sonnet"'), true);
+    assert.equal(restoredClaude.includes('"theme": "dark"'), true);
     const restoredGateway = await fs.readFile(
       path.join(root, "cache", "gateway-models.json"),
       "utf8",

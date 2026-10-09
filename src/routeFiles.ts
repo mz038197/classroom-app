@@ -161,7 +161,8 @@ export function createRouteFiles(paths: RouteFilePaths) {
         return;
       }
       if (!backup) {
-        backup = await captureModelBackup(paths);
+        backup = (await readDiskBackup(paths)) ?? (await captureModelBackup(paths));
+        await writeText(backupFile(paths), `${JSON.stringify(backup)}\n`);
       }
       const models = options.ids.map((id, index) => catalogEntry(id, index + 1));
       const catalogPath = path.join(path.dirname(paths.codex), "classroom-catalog.json");
@@ -199,8 +200,7 @@ type ModelBackup = {
   codexModel?: string;
   catalogPath?: string;
   modelsCache?: string;
-  claudeModel?: string;
-  hadClaudeModel: boolean;
+  claudeFile?: string;
   gateway?: string;
 };
 
@@ -212,18 +212,9 @@ function catalogEntry(id: string, priority: number): Record<string, unknown> {
   return {
     slug: id,
     display_name: id,
-    description: id,
     visibility: "list",
     supported_in_api: true,
     priority,
-    shell_type: "shell_command",
-    default_reasoning_level: "medium",
-    supported_reasoning_levels: [
-      {
-        effort: "medium",
-        description: "Balances speed and reasoning depth for everyday tasks",
-      },
-    ],
   };
 }
 
@@ -237,59 +228,78 @@ async function readOptional(file: string): Promise<string | undefined> {
 
 async function captureModelBackup(paths: RouteFilePaths): Promise<ModelBackup> {
   const toml = await readText(paths.codex);
-  const claude = parseJsonObject(await readText(paths.claude)) ?? {};
   return {
     codexModel: readTomlString(toml, "model"),
     catalogPath: readTomlString(toml, "model_catalog_json"),
     modelsCache: await readOptional(
       path.join(path.dirname(paths.codex), "models_cache.json"),
     ),
-    claudeModel: typeof claude.model === "string" ? claude.model : undefined,
-    hadClaudeModel: Object.hasOwn(claude, "model"),
+    claudeFile: await readOptional(paths.claude),
     gateway: await readOptional(gatewayCachePath(paths.claude)),
   };
 }
 
+function backupFile(paths: RouteFilePaths): string {
+  return path.join(path.dirname(paths.codex), "classroom-model-backup.json");
+}
+
+async function readDiskBackup(
+  paths: RouteFilePaths,
+): Promise<ModelBackup | undefined> {
+  const raw = await readOptional(backupFile(paths));
+  if (!raw) {
+    return undefined;
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  return parsed as ModelBackup;
+}
+
 async function writeClaudeModel(file: string, model: string): Promise<void> {
-  const current = parseJsonObject(await readText(file)) ?? {};
-  current.model = model;
-  await writeText(file, `${JSON.stringify(current, null, 2)}\n`);
+  const text = await readText(file);
+  const next =
+    text.trim() === ""
+      ? `${JSON.stringify({ model }, null, 2)}\n`
+      : replaceJsonProperty(text, "model", model);
+  await writeText(file, next.endsWith("\n") ? next : `${next}\n`);
+}
+
+async function restoreBackedFile(
+  file: string,
+  contents: string | undefined,
+): Promise<void> {
+  if (contents === undefined) {
+    await fs.rm(file, { force: true });
+    return;
+  }
+  await writeText(file, contents);
 }
 
 async function restoreModelOptions(
   paths: RouteFilePaths,
   backup: ModelBackup | undefined,
 ): Promise<void> {
-  if (!backup) {
+  const saved = backup ?? (await readDiskBackup(paths));
+  if (!saved) {
     return;
   }
   let toml = await readText(paths.codex);
-  toml = backup.catalogPath
-    ? upsertTomlString(toml, "model_catalog_json", backup.catalogPath)
+  toml = saved.catalogPath
+    ? upsertTomlString(toml, "model_catalog_json", saved.catalogPath)
     : removeTomlKey(toml, "model_catalog_json");
-  toml = backup.codexModel
-    ? upsertTomlString(toml, "model", backup.codexModel)
+  toml = saved.codexModel
+    ? upsertTomlString(toml, "model", saved.codexModel)
     : removeTomlKey(toml, "model");
   await writeText(paths.codex, toml);
-  const cachePath = path.join(path.dirname(paths.codex), "models_cache.json");
-  if (backup.modelsCache === undefined) {
-    await fs.rm(cachePath, { force: true });
-  } else {
-    await writeText(cachePath, backup.modelsCache);
-  }
-  const claude = parseJsonObject(await readText(paths.claude)) ?? {};
-  if (backup.hadClaudeModel) {
-    claude.model = backup.claudeModel;
-  } else {
-    delete claude.model;
-  }
-  await writeText(paths.claude, `${JSON.stringify(claude, null, 2)}\n`);
-  const gateway = gatewayCachePath(paths.claude);
-  if (backup.gateway === undefined) {
-    await fs.rm(gateway, { force: true });
-  } else {
-    await writeText(gateway, backup.gateway);
-  }
+  await restoreBackedFile(
+    path.join(path.dirname(paths.codex), "models_cache.json"),
+    saved.modelsCache,
+  );
+  await restoreBackedFile(paths.claude, saved.claudeFile);
+  await restoreBackedFile(gatewayCachePath(paths.claude), saved.gateway);
+  await fs.rm(backupFile(paths), { force: true });
 }
 
 async function readText(file: string): Promise<string> {
