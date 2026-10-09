@@ -384,12 +384,15 @@ export class ClassroomApp {
     if (!first) {
       return undefined;
     }
-    if (requested && this.modelIds.includes(requested)) {
-      this.sending.set(client, requested);
+    const id = requested?.startsWith("VCRouter/")
+      ? requested.slice("VCRouter/".length)
+      : requested;
+    if (id && this.modelIds.includes(id)) {
+      this.sending.set(client, id);
       this.modelNotice.delete(client);
-      return requested;
+      return id;
     }
-    if (requested && !this.modelIds.includes(requested)) {
+    if (id && !this.modelIds.includes(id)) {
       this.modelNotice.add(client);
       return first;
     }
@@ -423,6 +426,7 @@ export class ClassroomApp {
       codexModel: this.sending.get("codex") ?? first,
       claudeModel: this.sending.get("claude") ?? first,
       proxyBaseUrl: this.deps.proxyBaseUrl,
+      restartCodex: true,
     };
     await this.deps.routes.setModelOptions(options);
   }
@@ -619,7 +623,10 @@ export class ClassroomApp {
       claude.ANTHROPIC_BASE_URL,
       ...anthropicBaseValues(vsCode[VS_CODE_ENV]),
     ]);
-    await this.deps.routes.writeCodex({ ...codex, openai_base_url: url });
+    await this.deps.routes.writeCodex({
+      ...codex,
+      openai_base_url: codexBaseUrl(url),
+    });
     await this.deps.routes.writeClaudeTerminal({
       ...claude,
       ANTHROPIC_BASE_URL: url,
@@ -747,6 +754,10 @@ function hostnameOf(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function codexBaseUrl(proxyBaseUrl: string): string {
+  return proxyBaseUrl.endsWith("/v1") ? proxyBaseUrl : `${proxyBaseUrl}/v1`;
 }
 
 function sameProxy(value: string, proxyBaseUrl: string): boolean {

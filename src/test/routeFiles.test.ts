@@ -127,6 +127,38 @@ describe("route files", () => {
     assert.equal(written.includes("claude.example"), false);
   });
 
+  it("writes Codex catalog keys in the root and drops copies inside a later table", async () => {
+    const { routes, paths } = await tempRoutes();
+    const original = [
+      "trust = \"always\"",
+      "",
+      "[mcp]",
+      "server = \"local\"",
+      "",
+      "[shell_environment_policy.set]",
+      "openai_base_url = \"http://127.0.0.1:47821\"",
+      "model_catalog_json = \"C:\\\\wrong\\\\classroom-catalog.json\"",
+      "",
+    ].join("\n");
+    await fs.writeFile(paths.codex, original, "utf8");
+    await routes.setModelOptions({
+      ids: ["vcr-auto"],
+      codexModel: "vcr-auto",
+      claudeModel: "vcr-auto",
+      proxyBaseUrl: PROXY,
+    });
+    await routes.writeCodex({ openai_base_url: PROXY });
+    const toml = await fs.readFile(paths.codex, "utf8");
+    const root = toml.slice(0, toml.indexOf("[mcp]"));
+    const table = toml.slice(toml.indexOf("[shell_environment_policy.set]"));
+    assert.equal(root.includes("model_catalog_json = "), true);
+    assert.equal(root.includes('model = "VCRouter/vcr-auto"'), true);
+    assert.equal(root.includes('openai_base_url = "http://127.0.0.1:47821"'), true);
+    assert.equal(table.includes("openai_base_url"), false);
+    assert.equal(table.includes("model_catalog_json"), false);
+    assert.equal(toml.includes('server = "local"'), true);
+  });
+
   it("publishes the allowlist as the Codex and Claude pickers, then restores", async () => {
     const { routes, paths, root } = await tempRoutes();
     await fs.writeFile(
@@ -136,7 +168,7 @@ describe("route files", () => {
     );
     await fs.writeFile(
       path.join(root, "models_cache.json"),
-      '{"fetched_at":"2026-01-01T00:00:00Z","models":[{"slug":"gpt-5.6-luna"}]}\n',
+      '{"fetched_at":"2026-01-01T00:00:00Z","models":[{"slug":"gpt-5.6-luna","visibility":"list","shell_type":"shell_command","context_window":128000,"supported_reasoning_levels":[{"effort":"medium","description":"medium"}]}]}\n',
       "utf8",
     );
     await fs.writeFile(
@@ -163,24 +195,44 @@ describe("route files", () => {
     });
     const toml = await fs.readFile(paths.codex, "utf8");
     assert.equal(toml.includes('trust = "always"'), true);
-    assert.equal(toml.includes('model = "ollama_cloud@minimax-m3:cloud"'), true);
+    assert.equal(toml.includes('model = "VCRouter/ollama_cloud@minimax-m3:cloud"'), true);
     assert.equal(toml.includes("classroom-catalog.json"), true);
     assert.equal(toml.includes("native.json"), false);
     const catalog = JSON.parse(
       await fs.readFile(path.join(root, "classroom-catalog.json"), "utf8"),
-    ) as { models: Array<{ slug: string; visibility: string }> };
+    ) as {
+      models: Array<{
+        slug: string;
+        visibility: string;
+        shell_type: string;
+        context_window: number;
+        supported_reasoning_levels: Array<{ effort: string }>;
+      }>;
+    };
     assert.deepEqual(
       catalog.models.map((model) => model.slug),
-      ["ollama_cloud@minimax-m3:cloud", "later"],
+      [
+        "VCRouter/ollama_cloud@minimax-m3:cloud",
+        "VCRouter/later",
+      ],
     );
     assert.equal(catalog.models[0]?.visibility, "list");
+    assert.equal(catalog.models[0]?.shell_type, "shell_command");
+    assert.equal(catalog.models[0]?.context_window, 128000);
+    assert.equal(
+      catalog.models.some((model) => model.slug === "gpt-5.6-luna"),
+      false,
+    );
     const cache = JSON.parse(
       await fs.readFile(path.join(root, "models_cache.json"), "utf8"),
     ) as { fetched_at: string; models: Array<{ slug: string }> };
     assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
     assert.deepEqual(
       cache.models.map((model) => model.slug),
-      ["ollama_cloud@minimax-m3:cloud", "later"],
+      [
+        "VCRouter/ollama_cloud@minimax-m3:cloud",
+        "VCRouter/later",
+      ],
     );
     const claude = await fs.readFile(paths.claude, "utf8");
     assert.equal(claude.includes("// keep claude"), true);

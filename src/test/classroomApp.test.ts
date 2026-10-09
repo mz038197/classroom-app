@@ -985,7 +985,7 @@ describe("route addresses", () => {
       codex: { trust: "always", mcp: { server: "local" }, model: "kept" },
     });
     await app.start();
-    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.openai_base_url, `${PROXY}/v1`);
     assert.equal(docs.codex.trust, "always");
     assert.deepEqual(docs.codex.mcp, { server: "local" });
     assert.equal(docs.codex.model, "kept");
@@ -1061,7 +1061,7 @@ describe("route addresses", () => {
     assert.equal(viewText.includes("secret"), false);
     assert.equal(viewText.includes("vcr_sk"), false);
     assert.equal(viewText.includes(KEY), false);
-    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.openai_base_url, `${PROXY}/v1`);
     assert.equal(docs.codex.trust, "always");
   });
 
@@ -1138,7 +1138,7 @@ describe("route addresses", () => {
     await app.start();
     assert.equal(proxyStops(), 1);
     assert.equal(proxyStarts(), 2);
-    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.openai_base_url, `${PROXY}/v1`);
     assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);
     assert.deepEqual(docs.vsCode["claudeCode.environmentVariables"], [
       { name: "ANTHROPIC_BASE_URL", value: PROXY },
@@ -1568,7 +1568,7 @@ describe("close window", () => {
     app.closeWindow();
     assert.equal(proxyStops(), 0);
     assert.deepEqual(routeWrites, writes);
-    assert.equal(docs.codex.openai_base_url, PROXY);
+    assert.equal(docs.codex.openai_base_url, `${PROXY}/v1`);
     assert.equal(docs.codex.trust, "always");
     assert.deepEqual(docs.codex.mcp, { server: "local" });
     assert.equal(docs.claudeTerminal.ANTHROPIC_BASE_URL, PROXY);

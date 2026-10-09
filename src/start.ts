@@ -18,11 +18,16 @@ import {
 import { renderPage } from "./page";
 import { isPrototypeVariant, renderPrototypePage } from "./pagePrototype";
 import { createRouteFiles } from "./routeFiles";
+import { decodeRequestBody, ResponsesSse, responsesToChatBody, toolKindsFromResponses } from "./responsesChat";
 
 const port = 47821;
 const pageUrl = `http://127.0.0.1:${port}/`;
 const nodeRequire = createRequire(__filename);
-const responseSlot = new AsyncLocalStorage<{ status: number; body: string }>();
+const responseSlot = new AsyncLocalStorage<{
+  status: number;
+  body: string;
+  stream?: (res: http.ServerResponse) => Promise<void>;
+}>();
 
 function routerBaseUrl(): string {
   return (
@@ -398,7 +403,16 @@ function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      const bytes = Buffer.concat(chunks);
+      const encoding = req.headers["content-encoding"];
+      resolve(
+        decodeRequestBody(
+          bytes,
+          Array.isArray(encoding) ? encoding.join(",") : encoding,
+        ),
+      );
+    });
     req.on("error", reject);
   });
 }
@@ -532,6 +546,7 @@ async function sendUpstream(upstream: UpstreamSend): Promise<void> {
     return;
   }
   const slot = responseSlot.getStore();
+  const responses = upstream.path.includes("/responses");
   try {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -540,14 +555,59 @@ async function sendUpstream(upstream: UpstreamSend): Promise<void> {
       headers.Authorization = `Bearer ${upstream.apiKey}`;
     }
     const body =
-      upstream.target === "router"
-        ? rewriteModel(upstream.body ?? "", upstream.model)
-        : upstream.body;
-    const response = await fetch(`${upstreamOrigin(upstream.target)}${upstream.path}`, {
+      upstream.target === "router" && responses
+        ? responsesToChatBody(upstream.body ?? "", upstream.model)
+        : upstream.target === "router"
+          ? rewriteModel(upstream.body ?? "", upstream.model)
+          : upstream.body;
+    if (upstream.target === "router" && responses && body) {
+      const parsed = JSON.parse(body) as { messages?: unknown[] };
+      if (!parsed.messages?.length) {
+        if (slot) {
+          slot.status = 400;
+          slot.body = "Responses 正文裡沒有可送出的文字。";
+        }
+        return;
+      }
+    }
+    const url =
+      upstream.target === "router" && responses
+        ? `${routerBaseUrl()}/v1/chat/completions`
+        : `${upstreamOrigin(upstream.target)}${upstream.path}`;
+    const response = await fetch(url, {
       method: upstream.method ?? "POST",
       headers,
       body,
     });
+    if (responses && upstream.target === "router" && response.ok && response.body) {
+      const sse = new ResponsesSse(
+        upstream.model,
+        toolKindsFromResponses(upstream.body ?? ""),
+      );
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      if (slot) {
+        slot.status = 200;
+        slot.stream = async (res) => {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          });
+          res.write(sse.created());
+          while (true) {
+            const next = await reader.read();
+            if (next.done) {
+              break;
+            }
+            res.write(sse.pushChatChunk(decoder.decode(next.value, { stream: true })));
+          }
+          res.write(sse.finish());
+          res.end();
+        };
+      }
+      return;
+    }
     const text = await response.text();
     if (slot) {
       slot.status = response.status;
@@ -697,7 +757,11 @@ async function main(): Promise<void> {
         (pathname.startsWith("/v1/") || pathname.startsWith("/backend-api/"))
       ) {
         const body = await readBody(req, 1_048_576);
-        const slot = { status: 502, body: "上游沒有回應。" };
+        const slot: {
+          status: number;
+          body: string;
+          stream?: (res: http.ServerResponse) => Promise<void>;
+        } = { status: 502, body: "上游沒有回應。" };
         await responseSlot.run(slot, () =>
           app.forward({
             client: clientOf(req, pathname),
@@ -707,6 +771,10 @@ async function main(): Promise<void> {
             body,
           }),
         );
+        if (slot.stream) {
+          await slot.stream(res);
+          return;
+        }
         res.writeHead(slot.status, {
           "Content-Type": "application/json; charset=utf-8",
         });

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -94,21 +95,22 @@ export type ModelOptions = {
   codexModel: string;
   claudeModel: string;
   proxyBaseUrl: string;
+  restartCodex?: boolean;
 };
 
 export function createRouteFiles(paths: RouteFilePaths) {
   let backup: ModelBackup | undefined;
   return {
     async readCodex(): Promise<Record<string, unknown>> {
-      const url = readTomlString(await readText(paths.codex), "openai_base_url");
+      const url = readRootTomlString(await readText(paths.codex), "openai_base_url");
       return url === undefined ? {} : { openai_base_url: url };
     },
     async writeCodex(doc: Record<string, unknown>): Promise<void> {
       const text = await readText(paths.codex);
       const next =
         typeof doc.openai_base_url === "string"
-          ? upsertTomlString(text, "openai_base_url", doc.openai_base_url)
-          : removeTomlKey(text, "openai_base_url");
+          ? upsertRootTomlString(text, "openai_base_url", doc.openai_base_url)
+          : removeRootTomlKey(text, "openai_base_url");
       await writeText(paths.codex, next);
     },
     async readClaudeTerminal(): Promise<Record<string, unknown>> {
@@ -164,11 +166,15 @@ export function createRouteFiles(paths: RouteFilePaths) {
         backup = (await readDiskBackup(paths)) ?? (await captureModelBackup(paths));
         await writeText(backupFile(paths), `${JSON.stringify(backup)}\n`);
       }
-      const models = options.ids.map((id, index) => catalogEntry(id, index + 1));
       const catalogPath = path.join(path.dirname(paths.codex), "classroom-catalog.json");
+      const cachePath = path.join(path.dirname(paths.codex), "models_cache.json");
+      const liveCache = await readOptional(cachePath);
+      const template = pickTemplate(liveCache) ?? pickTemplate(backup.modelsCache);
+      const models = catalogModels(options.ids, template);
+      const selected = catalogSlug(options.codexModel);
       await writeText(catalogPath, `${JSON.stringify({ models }, null, 2)}\n`);
       await writeText(
-        path.join(path.dirname(paths.codex), "models_cache.json"),
+        cachePath,
         `${JSON.stringify(
           {
             fetched_at: "2000-01-01T00:00:00Z",
@@ -180,8 +186,8 @@ export function createRouteFiles(paths: RouteFilePaths) {
         )}\n`,
       );
       let toml = await readText(paths.codex);
-      toml = upsertTomlString(toml, "model_catalog_json", catalogPath);
-      toml = upsertTomlString(toml, "model", options.codexModel);
+      toml = upsertRootTomlString(toml, "model_catalog_json", catalogPath);
+      toml = upsertRootTomlString(toml, "model", selected);
       await writeText(paths.codex, toml);
       await writeClaudeModel(paths.claude, options.claudeModel);
       await writeText(
@@ -192,6 +198,9 @@ export function createRouteFiles(paths: RouteFilePaths) {
           models: options.ids.map((id) => ({ id, display_name: id })),
         })}\n`,
       );
+      if (options.restartCodex) {
+        await restartCodexAppServers();
+      }
     },
   };
 }
@@ -208,14 +217,160 @@ function gatewayCachePath(claudeSettings: string): string {
   return path.join(path.dirname(claudeSettings), "cache", "gateway-models.json");
 }
 
-function catalogEntry(id: string, priority: number): Record<string, unknown> {
-  return {
-    slug: id,
-    display_name: id,
-    visibility: "list",
-    supported_in_api: true,
-    priority,
-  };
+const ROUTED_PREFIX = "VCRouter/";
+
+function catalogSlug(id: string): string {
+  return id.startsWith(ROUTED_PREFIX) ? id : `${ROUTED_PREFIX}${id}`;
+}
+
+function pickTemplate(raw: string | undefined): Record<string, unknown> | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const models = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && Array.isArray((parsed as { models?: unknown }).models)
+      ? (parsed as { models: unknown[] }).models
+      : [];
+  const listed = models.find((model) => {
+    if (!model || typeof model !== "object" || Array.isArray(model)) {
+      return false;
+    }
+    return (model as Record<string, unknown>).visibility === "list";
+  });
+  if (!listed || typeof listed !== "object" || Array.isArray(listed)) {
+    return undefined;
+  }
+  return structuredClone(listed as Record<string, unknown>);
+}
+
+function catalogModels(
+  ids: string[],
+  template: Record<string, unknown> | undefined,
+): Record<string, unknown>[] {
+  return ids.map((id, index) => {
+    const slug = catalogSlug(id);
+    const entry = template ? structuredClone(template) : {
+      shell_type: "shell_command",
+      visibility: "list",
+      supported_in_api: true,
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Fast responses with lighter reasoning" },
+        { effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" },
+        { effort: "high", description: "Greater reasoning depth for complex problems" },
+        { effort: "xhigh", description: "Extra high reasoning depth for complex problems" },
+        { effort: "max", description: "Maximum reasoning depth for the hardest problems" },
+        { effort: "ultra", description: "Maximum reasoning with automatic task delegation" },
+      ],
+      base_instructions: "You are a helpful coding assistant.",
+      supports_parallel_tool_calls: true,
+      context_window: 128000,
+      max_context_window: 128000,
+      input_modalities: ["text", "image"],
+    };
+    entry.slug = slug;
+    entry.display_name = slug;
+    entry.description = `Routed via classroom → VCRouter (${id}).`;
+    entry.visibility = "list";
+    entry.supported_in_api = true;
+    entry.priority = index + 1;
+    entry.upgrade = null;
+    return entry;
+  });
+}
+
+function rootTomlLines(text: string): { lines: string[]; rootEnd: number } {
+  const lines = text.split("\n");
+  const table = lines.findIndex((line) => /^\s*\[/.test(line));
+  return { lines, rootEnd: table === -1 ? lines.length : table };
+}
+
+function readRootTomlString(text: string, key: string): string | undefined {
+  const { lines, rootEnd } = rootTomlLines(text);
+  const pattern = new RegExp(`^\\s*${key}\\s*=\\s*"((?:\\\\.|[^"\\\\])*)"`);
+  for (let i = 0; i < rootEnd; i += 1) {
+    const match = lines[i]?.match(pattern);
+    if (match?.[1] !== undefined) {
+      return match[1].replaceAll("\\\\", "\\").replaceAll('\\"', '"');
+    }
+  }
+  return undefined;
+}
+
+function upsertRootTomlString(text: string, key: string, value: string): string {
+  const { lines, rootEnd } = rootTomlLines(stripKeyOutsideRoot(text, key));
+  const escaped = value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  const line = `${key} = "${escaped}"`;
+  const pattern = new RegExp(`^\\s*${key}\\s*=`);
+  for (let i = 0; i < rootEnd; i += 1) {
+    if (pattern.test(lines[i] ?? "")) {
+      lines[i] = line;
+      return lines.join("\n");
+    }
+  }
+  let insertAt = rootEnd;
+  while (insertAt > 0 && (lines[insertAt - 1] ?? "").trim() === "") {
+    insertAt -= 1;
+  }
+  lines.splice(insertAt, 0, line);
+  return lines.join("\n");
+}
+
+function removeRootTomlKey(text: string, key: string): string {
+  const { lines, rootEnd } = rootTomlLines(text);
+  const pattern = new RegExp(`^\\s*${key}\\s*=`);
+  return lines.filter((line, index) => index >= rootEnd || !pattern.test(line)).join("\n");
+}
+
+function stripKeyOutsideRoot(text: string, key: string): string {
+  const { lines, rootEnd } = rootTomlLines(text);
+  const pattern = new RegExp(`^\\s*${key}\\s*=`);
+  return lines.filter((line, index) => index < rootEnd || !pattern.test(line)).join("\n");
+}
+
+function restartCodexAppServers(): Promise<void> {
+  if (process.platform !== "win32") {
+    return Promise.resolve();
+  }
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "Get-CimInstance Win32_Process | Where-Object {",
+    "  $_.CommandLine -and $_.CommandLine -match '(?i)(^|\\\\|\\s)codex(\\.exe|\\.cmd)?(\\s|\").*\\bapp-server\\b'",
+    "} | ForEach-Object { $_.ProcessId }",
+  ].join("\n");
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NoLogo", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+      { timeout: 12_000, windowsHide: true },
+      (_error, stdout) => {
+        const pids = String(stdout)
+          .split(/\r?\n/)
+          .map((line) => Number(line.trim()))
+          .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+        if (pids.length === 0) {
+          resolve();
+          return;
+        }
+        let left = pids.length;
+        for (const pid of pids) {
+          execFile("taskkill", ["/PID", String(pid), "/T"], { windowsHide: true }, () => {
+            left -= 1;
+            if (left === 0) {
+              resolve();
+            }
+          });
+        }
+      },
+    );
+  });
 }
 
 async function readOptional(file: string): Promise<string | undefined> {
@@ -229,8 +384,8 @@ async function readOptional(file: string): Promise<string | undefined> {
 async function captureModelBackup(paths: RouteFilePaths): Promise<ModelBackup> {
   const toml = await readText(paths.codex);
   return {
-    codexModel: readTomlString(toml, "model"),
-    catalogPath: readTomlString(toml, "model_catalog_json"),
+    codexModel: readRootTomlString(toml, "model"),
+    catalogPath: readRootTomlString(toml, "model_catalog_json"),
     modelsCache: await readOptional(
       path.join(path.dirname(paths.codex), "models_cache.json"),
     ),
@@ -287,11 +442,11 @@ async function restoreModelOptions(
   }
   let toml = await readText(paths.codex);
   toml = saved.catalogPath
-    ? upsertTomlString(toml, "model_catalog_json", saved.catalogPath)
-    : removeTomlKey(toml, "model_catalog_json");
+    ? upsertRootTomlString(toml, "model_catalog_json", saved.catalogPath)
+    : removeRootTomlKey(toml, "model_catalog_json");
   toml = saved.codexModel
-    ? upsertTomlString(toml, "model", saved.codexModel)
-    : removeTomlKey(toml, "model");
+    ? upsertRootTomlString(toml, "model", saved.codexModel)
+    : removeRootTomlKey(toml, "model");
   await writeText(paths.codex, toml);
   await restoreBackedFile(
     path.join(path.dirname(paths.codex), "models_cache.json"),
@@ -380,35 +535,6 @@ function stripJsonComments(text: string): string {
     out += c;
   }
   return out;
-}
-
-// ponytail: first assignment wins, including one inside a table. Upgrade path: a TOML parser.
-function readTomlString(text: string, key: string): string | undefined {
-  const match = text.match(
-    new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*"((?:\\\\.|[^"\\\\])*)"`, "m"),
-  );
-  if (!match) {
-    return undefined;
-  }
-  return match[1].replaceAll("\\\\", "\\").replaceAll('\\"', '"');
-}
-
-function upsertTomlString(text: string, key: string, value: string): string {
-  const escaped = value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-  const line = `${key} = "${escaped}"`;
-  const existing = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, "m");
-  if (existing.test(text)) {
-    return text.replace(existing, line);
-  }
-  const base = text.length === 0 || text.endsWith("\n") ? text : `${text}\n`;
-  return `${base}${line}\n`;
-}
-
-function removeTomlKey(text: string, key: string): string {
-  return text.replace(
-    new RegExp(`^[ \\t]*${key}[ \\t]*=.*(?:\\r?\\n)?`, "m"),
-    "",
-  );
 }
 
 // ponytail: replaces the first property with this name. Upgrade path: a JSONC editor.
