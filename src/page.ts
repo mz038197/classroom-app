@@ -594,7 +594,7 @@ function presentCommand(body: string): { inline: string; dialog: string } {
   return { inline, dialog };
 }
 
-function splitCourseCards(html: string): string {
+function splitCourseCards(html: string, view: ClassroomAppView): string {
   const commandMatch = html.match(
     /<section class="tile wide"><h2>指令<\/h2>([\s\S]*?)<\/section>/,
   );
@@ -610,12 +610,15 @@ function splitCourseCards(html: string): string {
   const snippetAt = courseMatch[1].indexOf(snippetHeading);
   const courseBody =
     snippetAt === -1 ? courseMatch[1] : courseMatch[1].slice(0, snippetAt);
-  const snippetBody =
-    snippetAt === -1
-      ? `<p class="empty">這堂課沒有片段。</p>`
-      : courseMatch[1].slice(snippetAt + snippetHeading.length);
-  const install = `<section class="tile wide"><div class="tile-head"><h2>課程安裝</h2></div>${courseBody}${presented.inline}</section>${presented.dialog}`;
-  const snippets = `<section class="tile wide"><div class="tile-head"><h2>課程片段</h2></div>${snippetBody}</section>`;
+  const snippetBody = (view.catalog?.snippets ?? []).map((snippet) => {
+    const hint = snippet.pasteHint
+      ? `<p class="hint">${escapeHtml(snippet.pasteHint)}</p>`
+      : "";
+    return `<article class="install-card snippet-card"><div class="install-top"><span data-kind="snippet" class="kind-tag">片段</span><strong>${escapeHtml(snippet.title)}</strong></div>${hint}<pre class="snippet-code">${escapeHtml(snippet.body)}</pre><div class="snippet-actions"><button type="button" data-copy-snippet="${escapeHtml(snippet.id)}">複製</button><span class="hint" data-snippet-copy-status role="status" aria-live="polite"></span></div></article>`;
+  }).join("") || `<p class="empty">這堂課沒有片段。</p>`;
+  const chevron = `<svg class="course-chevron" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>`;
+  const install = `<section class="tile wide"><details class="course-section" data-course-section="install" open><summary class="tile-head"><h2>課程安裝</h2>${chevron}</summary><div class="course-content">${courseBody}${presented.inline}</div></details></section>${presented.dialog}`;
+  const snippets = `<section class="tile wide"><details class="course-section" data-course-section="snippets" open><summary class="tile-head"><h2>課程片段</h2>${chevron}</summary><div class="course-content">${snippetBody}</div></details></section>`;
   return html.replace(commandMatch[0], install).replace(courseMatch[0], snippets);
 }
 
@@ -636,6 +639,43 @@ function drawerScript(): string {
       }
       if (target.closest(".menu-toggle")) setOpen(!bar.classList.contains("open"));
       if (target.closest(".drawer-scrim") || target.closest(".side-item")) setOpen(false);
+    });
+  `;
+}
+
+function snippetCopyScript(): string {
+  return `
+    document.addEventListener("click", async function (event) {
+      var target = event.target;
+      var button = target && target.closest ? target.closest("[data-copy-snippet]") : null;
+      if (!button || button.disabled) return;
+      var status = button.closest(".snippet-card").querySelector("[data-snippet-copy-status]");
+      button.disabled = true;
+      status.textContent = "";
+      try {
+        var response = await fetch("/copy-snippet", {
+          method: "POST",
+          body: new URLSearchParams({ snippet_id: button.getAttribute("data-copy-snippet") }),
+        });
+        if (!response.ok || !(await response.json()).ok) throw new Error("copy failed");
+        status.textContent = "已複製完整片段。";
+      } catch (error) {
+        status.textContent = "複製失敗，請再試一次。";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  `;
+}
+
+function courseSectionScript(): string {
+  return `
+    document.querySelectorAll("[data-course-section]").forEach(function (section) {
+      var key = "vpod.course." + section.getAttribute("data-course-section") + ".collapsed";
+      try { section.open = sessionStorage.getItem(key) !== "true"; } catch (error) {}
+      section.addEventListener("toggle", function () {
+        try { sessionStorage.setItem(key, String(!section.open)); } catch (error) {}
+      });
     });
   `;
 }
@@ -740,7 +780,7 @@ export function renderPage(view: ClassroomAppView): string {
   if (view.catalog?.actions.length) {
     html = html.replace(/<table>[\s\S]*?<\/table>/, installActionCards(view));
   }
-  html = splitCourseCards(html);
+  html = splitCourseCards(html, view);
   const extra = `<style>
     .tile { border: 1px solid light-dark(#e6e6e6, #3d3d3d); }
     .display { display: none; }
@@ -769,6 +809,12 @@ export function renderPage(view: ClassroomAppView): string {
       main { width: min(52rem, 100%); margin: 0 auto; }
     }
     .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .course-section > summary { cursor: pointer; list-style: none; border-radius: 6px; }
+    .course-section > summary::-webkit-details-marker { display: none; }
+    .course-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    .course-chevron { width: 20px; height: 20px; flex-shrink: 0; color: var(--muted); }
+    .course-section[open] > summary .course-chevron { transform: rotate(90deg); }
+    .course-content { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
     .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(16, 163, 127, 0.10), rgba(78, 203, 157, 0.13)); color: light-dark(#0a7d5c, #4ecb9d); font-size: 12px; font-weight: 600; }
     .badge.off { background: light-dark(#f4f4f4, #303030); color: light-dark(#6e6e6e, #a6a6a6); }
     .welcome { font-size: 1.15rem; font-weight: 700; }
@@ -776,20 +822,26 @@ export function renderPage(view: ClassroomAppView): string {
     .model-value { min-height: 2.75rem; border-radius: 10px; background: var(--input); padding: 0.55rem 0.8rem; display: flex; align-items: center; overflow-wrap: anywhere; }
     .tool em { color: var(--text); }
     .tool em.missing { color: var(--muted); }
-    .install-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line); }
-    .install-card:first-of-type { border-top: 0; padding-top: 0; }
-    .install-top { display: flex; align-items: center; gap: 8px; width: 100%; }
+    .install-card { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; width: 100%; padding: 14px; border: 1px solid light-dark(#dfe3e8, #404044); border-radius: 12px; background: light-dark(#f8fafc, #252528); }
+    .install-top { display: flex; align-items: center; gap: 8px; width: 100%; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
     .install-top strong { min-width: 0; overflow-wrap: anywhere; }
     .installed-tag { margin-left: auto; flex-shrink: 0; background: light-dark(#d1fae5, #163c30); color: light-dark(#065f46, #6ee7b7); }
     .kind-tag { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(13, 13, 13, 0.06), rgba(255, 255, 255, 0.09)); color: var(--muted); font-size: 12px; font-weight: 600; }
     .kind-tag[data-kind="package"] { background: light-dark(#dbeafe, #172f50); color: light-dark(#1e40af, #93c5fd); }
     .kind-tag[data-kind="skill"] { background: light-dark(#ede9fe, #35254e); color: light-dark(#6d28d9, #c4b5fd); }
     .kind-tag[data-kind="mcp"] { background: light-dark(#d1fae5, #163c30); color: light-dark(#065f46, #6ee7b7); }
+    .kind-tag[data-kind="snippet"] { background: light-dark(#fef3c7, #443516); color: light-dark(#92400e, #fcd34d); }
+    .snippet-code { width: 100%; height: 10rem; flex-shrink: 0; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--input); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+    [data-snippet-copy-status]:empty { display: none; }
+    .snippet-actions { display: flex; align-items: center; gap: 10px; }
+    .snippet-actions button, [data-snippet-copy-status] { flex-shrink: 0; white-space: nowrap; }
     .confirm-dialog { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: light-dark(rgba(20, 20, 20, 0.32), rgba(0, 0, 0, 0.52)); }
-    .confirm-panel { width: min(36rem, 100%); max-height: min(70vh, 32rem); overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; background: var(--tile); border: 1px solid var(--line); }
+    .confirm-panel { width: min(36rem, 100%); max-height: min(70dvh, 32rem); overflow: hidden; display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; background: var(--tile); border: 1px solid var(--line); }
+    .confirm-panel > :not(pre) { flex-shrink: 0; }
     .confirm-panel h2 { font-size: 20px; font-weight: 600; color: var(--text); }
     .confirm-panel pre { max-height: 40vh; overflow: auto; }
-    .confirm-panel .pending { padding: 14px 16px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; flex-shrink: 0; color-scheme: dark; }
+    .confirm-panel .pending { max-height: min(12dvh, 5rem); min-height: 0; flex-shrink: 1; }
+    .confirm-panel [data-install-output] { height: min(32dvh, 16rem); max-height: min(32dvh, 16rem); min-height: 0; flex: 0 1 16rem; padding: 14px 16px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; color-scheme: dark; }
     .confirm-panel [hidden] { display: none; }
     .confirm-panel button { min-height: 34px; padding: 8px 16px; border-radius: 999px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 500; }
     .confirm-panel button.quiet { background: light-dark(#ffffff, #212121); color: light-dark(#0d0d0d, #ececec); border-color: light-dark(#e6e6e6, #3d3d3d); }
@@ -817,6 +869,6 @@ export function renderPage(view: ClassroomAppView): string {
     main button.copy-icon { width: 34px; min-height: 34px; padding: 0; }
     .copy-icon svg { width: 1.15rem; height: 1.15rem; }
   </style>
-  <script>${drawerScript()}${installProgressScript}</script>`;
+  <script>${drawerScript()}${installProgressScript}${snippetCopyScript()}${courseSectionScript()}</script>`;
   return html.replace("</body>", `${extra}</body>`);
 }

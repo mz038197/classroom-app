@@ -101,6 +101,8 @@ describe("Classroom App page", () => {
     assert.match(official, /<em class="missing">未安裝<\/em>/);
     assert.match(official, /<h2>課程安裝<\/h2>/);
     assert.match(official, /<h2>課程片段<\/h2>/);
+    assert.match(official, /<details class="course-section" data-course-section="install" open><summary/);
+    assert.match(official, /<details class="course-section" data-course-section="snippets" open><summary/);
     assert.match(official, /這堂課沒有片段。/);
     assert.equal(official.includes("<h2>指令</h2>"), false);
     assert.equal(official.includes("<h2>課程</h2>"), false);
@@ -137,6 +139,9 @@ describe("Classroom App page", () => {
     assert.equal(outputted.includes("Installed 1 package"), false);
     assert.equal(outputted.includes('class="confirm-dialog"'), false);
     assert.match(withSnippet, /骨架/);
+    assert.match(withSnippet, /data-copy-snippet="stub">複製<\/button>/);
+    assert.match(withSnippet, /<pre class="snippet-code">print\(1\)\n<\/pre>/);
+    assert.equal(withSnippet.includes(">展開</button>"), false);
     assert.equal(withSnippet.includes("<h3>本課片段</h3>"), false);
     assert.equal(withSnippet.includes("這堂課沒有片段。"), false);
     const installAt = withSnippet.indexOf("<h2>課程安裝</h2>");

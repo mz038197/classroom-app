@@ -657,6 +657,17 @@ export class ClassroomApp {
     this.notice = "已複製 Classroom API Key。請勿分享給不信任的人。";
   }
 
+  async copySnippet(snippetId: string): Promise<boolean> {
+    const snippet = this.catalog?.snippets?.find((item) => item.id === snippetId);
+    if (!snippet) return false;
+    try {
+      await this.deps.clipboard.write(snippet.body);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async clearConnection(): Promise<void> {
     await this.deps.storage.clearApiKey();
     this.connected = false;

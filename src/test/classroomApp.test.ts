@@ -244,6 +244,29 @@ function harness(
   };
 }
 
+describe("copy lesson snippets", () => {
+  it("copies the complete selected snippet including lines beyond the visible region", async () => {
+    const body = Array.from({ length: 50 }, (_,index) => `print('第 ${index + 1} 行')`).join("\n") + "\n";
+    const { app, clipboard, clipboardWrites } = harness(undefined, {
+      catalogYaml: `actions: []\nsnippets:\n  - id: full\n    title: 完整程式\n    body: ${JSON.stringify(body)}\n  - id: other\n    title: 其他片段\n    body: other\n`,
+    });
+    await app.redeem("ABC12345", "Ada");
+    assert.equal(await app.copySnippet("full"), true);
+    assert.equal(clipboard(), body);
+    assert.equal(clipboardWrites(), 1);
+    assert.equal(await app.copySnippet("missing"), false);
+    assert.equal(clipboardWrites(), 1);
+  });
+
+  it("reports a clipboard failure without changing the snippet", async () => {
+    const { app, failClipboard } = harness();
+    await app.redeem("ABC12345", "Ada");
+    failClipboard(new Error("clipboard unavailable"));
+    assert.equal(await app.copySnippet("stub"), false);
+    assert.equal(app.view().catalog?.snippets?.[0].body, "print(1)\n");
+  });
+});
+
 describe("Classroom App redeem", () => {
   it("does not redeem when the invite code is blank after trim", async () => {
     const { app, redeemCalls, modelKeys } = harness();

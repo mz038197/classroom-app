@@ -710,6 +710,13 @@ async function main(): Promise<void> {
         goHome(params);
         return;
       }
+      if (req.method === "POST" && pathname === "/copy-snippet") {
+        const params = new URLSearchParams(await readBody(req));
+        const ok = await app.copySnippet(params.get("snippet_id") ?? "");
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok }));
+        return;
+      }
       if (req.method === "POST" && pathname === "/clear") {
         const params = new URLSearchParams(await readBody(req));
         await app.clearConnection();
