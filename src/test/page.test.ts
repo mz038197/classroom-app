@@ -74,7 +74,12 @@ describe("Classroom App page", () => {
     assert.match(original, /class="display"/);
     assert.match(original, /\.tile \{ border: 1px solid light-dark\(#e6e6e6, #3d3d3d\); \}/);
     assert.match(original, /\.display \{ display: none; \}/);
-    assert.match(original, /\.brand \{ grid-column: 2; justify-self: center; \}/);
+    assert.match(original, /class="page-head"><h2>教室設定<\/h2><p>連線、資料夾、模型與環境。<\/p>/);
+    assert.equal(renderPage(view()).includes("連線、資料夾、模型與環境。"), false);
+    assert.match(original, /grid-template-columns: 232px/);
+    assert.match(original, /translateX\(-100%\)/);
+    assert.equal(renderPage(view()).includes("教室設定"), false);
+    assert.equal(renderPage(view()).includes("mobile-top"), false);
     assert.match(original, /class="tile-head"><h2>連線<\/h2><span class="badge">已連線<\/span>/);
     const offline = renderPrototypePage(view({ connected: false }), "D");
     assert.match(offline, /class="badge off">未連線</);

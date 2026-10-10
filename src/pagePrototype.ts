@@ -513,6 +513,14 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     `<section class="tile"><h2>連線</h2>`,
     `<section class="tile"><div class="tile-head"><h2>連線</h2>${tag}</div>`,
   );
+  html = html.replace(
+    `<header class="bar">`,
+    `<div class="mobile-top"><button type="button" class="menu-toggle" aria-label="開啟選單" aria-expanded="false" aria-controls="side-menu"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="brand"><div class="logo-badge"><img src="/brand-logo.png" alt=""></div><h1 class="gradient-text">凡思課堂安裝</h1></div></div><button type="button" class="drawer-scrim" aria-label="關閉選單"></button><header class="bar" id="side-menu">`,
+  );
+  html = html.replace(
+    `<button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
+    `<nav aria-label="選單"><button type="button" class="side-item" aria-current="page">教室設定</button></nav><button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
+  );
   if (view.connected && view.canCopyKey) {
     const off = view.commandRunning ? " disabled" : "";
     const hidden = `<input type="hidden" name="prototype_variant" value="${variant}">`;
@@ -525,7 +533,7 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     const session = view.sessionTitle
       ? `<p class="session-sub">${escapeText(view.sessionTitle)}</p>`
       : "";
-    const block = `${welcome}${course}${session}<div class="key-row"><p>API KEY 已設定</p><form method="post" action="/copy">${hidden}<button type="submit" class="copy-icon" aria-label="複製 Classroom API Key"${off}>${COPY_ICON}</button></form></div><form method="post" action="/clear">${hidden}<button type="submit" class="quiet"${off}>清除連線</button></form>`;
+    const block = `${welcome}${course}${session}<div class="key-row"><p>API KEY 已設定</p><form method="post" action="/copy">${hidden}<button type="submit" class="copy-icon" aria-label="複製 Classroom API Key"${off}>${COPY_ICON}</button></form></div><form method="post" action="/clear">${hidden}<button type="submit" class="stop"${off}>清除連線</button></form>`;
     html = html.replace(
       /<form method="post" action="\/copy">[\s\S]*?<\/form>\s*<form method="post" action="\/clear">[\s\S]*?<\/form>/,
       block,
@@ -536,6 +544,10 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
       "",
     );
   }
+  html = html.replace(
+    `<div class="modules">`,
+    `<header class="page-head"><h2>教室設定</h2><p>連線、資料夾、模型與環境。</p></header><div class="modules">`,
+  );
   const extra = `<style>
     .proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 80; width: min(440px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 6px; align-items: center; }
     .proto-state { width: 100%; max-height: 88px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: 10px; background: #111; color: #f4f4f4; border: 2px solid #f5c518; font-size: 10px; line-height: 1.35; }
@@ -544,9 +556,29 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     .proto-pill span { font-size: 13px; font-weight: 600; min-width: 9rem; text-align: center; }
     .tile { border: 1px solid light-dark(#e6e6e6, #3d3d3d); }
     .display { display: none; }
-    .bar { display: grid; grid-template-columns: 1fr auto 1fr; }
-    .brand { grid-column: 2; justify-self: center; }
-    [data-appearance-toggle] { grid-column: 3; justify-self: end; }
+    body { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100dvh; }
+    .bar { position: sticky; top: 0; align-self: start; height: 100dvh; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px; padding: 18px 14px; border-bottom: 0; border-right: 1px solid var(--line); }
+    .bar .brand { padding: 6px 8px 14px; }
+    .bar .logo-badge { width: 28px; height: 28px; }
+    .bar .gradient-text { font-size: 15px; }
+    .bar nav { display: flex; flex-direction: column; }
+    .side-item { align-self: stretch; justify-content: flex-start; min-height: 36px; padding: 8px 10px; border-radius: 8px; background: light-dark(rgba(13, 13, 13, 0.06), rgba(255, 255, 255, 0.09)); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; }
+    .bar [data-appearance-toggle] { margin-top: auto; align-self: flex-start; }
+    .mobile-top, .drawer-scrim, .menu-toggle { display: none; }
+    main { justify-self: center; width: min(52rem, 100%); }
+    @media (max-width: 760px) {
+      body { display: block; }
+      .mobile-top { display: flex; position: sticky; top: 0; z-index: 20; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--bar); backdrop-filter: blur(24px) saturate(160%); }
+      .mobile-top .brand { flex: 1; min-width: 0; padding: 4px; }
+      .mobile-top .gradient-text { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .menu-toggle { display: grid; place-items: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text); }
+      .menu-toggle svg { width: 20px; height: 20px; }
+      .bar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; width: min(280px, 84vw); height: 100dvh; transform: translateX(-100%); visibility: hidden; border-right: 1px solid var(--line); background: light-dark(rgba(242, 242, 247, 0.97), rgba(12, 12, 14, 0.96)); }
+      .bar.open { transform: translateX(0); visibility: visible; }
+      .bar .brand { display: none; }
+      .drawer-scrim.show { display: block; position: fixed; inset: 0; z-index: 30; border: 0; padding: 0; background: light-dark(rgba(20, 20, 20, 0.32), rgba(0, 0, 0, 0.52)); }
+      main { width: min(52rem, 100%); margin: 0 auto; }
+    }
     .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(16, 163, 127, 0.10), rgba(78, 203, 157, 0.13)); color: light-dark(#0a7d5c, #4ecb9d); font-size: 12px; font-weight: 600; }
     .badge.off { background: light-dark(#f4f4f4, #303030); color: light-dark(#6e6e6e, #a6a6a6); }
@@ -555,6 +587,16 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     .session-sub { color: var(--muted); font-size: 0.85rem; }
     .key-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .copy-icon { width: 2.75rem; min-height: 2.75rem; padding: 0; display: grid; place-items: center; }
+    .page-head { margin: 0.75rem 0 0.15rem; }
+    .page-head h2 { font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: 0; }
+    .page-head p { margin-top: 4px; color: var(--muted); font-size: 14px; font-weight: 400; }
+    main button { min-height: 34px; padding: 8px 16px; border-radius: 999px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 500; }
+    main button.quiet { background: light-dark(#ffffff, #212121); color: light-dark(#0d0d0d, #ececec); border-color: light-dark(#e6e6e6, #3d3d3d); padding: 8px 16px; }
+    main button.stop { background: transparent; color: light-dark(#b91c1c, #f87171); border-color: light-dark(rgba(185, 28, 28, 0.35), rgba(248, 113, 113, 0.35)); }
+    main .modes { border-radius: 999px; padding: 2px; background: light-dark(#f4f4f4, #303030); border: 1px solid light-dark(#e6e6e6, #3d3d3d); }
+    main .modes button { background: transparent; color: var(--text); border-color: transparent; }
+    main .modes button.on { background: var(--accent); color: var(--on-accent); }
+    main button.copy-icon { width: 34px; min-height: 34px; padding: 0; }
     .copy-icon svg { width: 1.15rem; height: 1.15rem; }
   </style>
   ${switcher(variant, stateText(view))}
@@ -568,10 +610,24 @@ function switcherScript(variant: PrototypeVariant): string {
       var target = event.target;
       if (!target || !target.closest) return;
       var jump = target.closest("[data-proto-go]");
-      if (!jump) return;
-      var url = new URL(location.href);
-      url.searchParams.set("variant", jump.getAttribute("data-proto-go"));
-      location.assign(url.pathname + url.search);
+      if (jump) {
+        var url = new URL(location.href);
+        url.searchParams.set("variant", jump.getAttribute("data-proto-go"));
+        location.assign(url.pathname + url.search);
+        return;
+      }
+      var bar = document.getElementById("side-menu");
+      var scrim = document.querySelector(".drawer-scrim");
+      var toggle = document.querySelector(".menu-toggle");
+      if (!bar || !scrim || !toggle) return;
+      function setOpen(open) {
+        bar.classList.toggle("open", open);
+        scrim.classList.toggle("show", open);
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        toggle.setAttribute("aria-label", open ? "關閉選單" : "開啟選單");
+      }
+      if (target.closest(".menu-toggle")) setOpen(!bar.classList.contains("open"));
+      if (target.closest(".drawer-scrim") || target.closest(".side-item")) setOpen(false);
     });
     window.addEventListener("keydown", function (event) {
       var tag = event.target && event.target.tagName;
