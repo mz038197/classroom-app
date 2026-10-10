@@ -79,6 +79,13 @@ describe("Classroom App page", () => {
     assert.match(list, /class="set-row"/);
     assert.match(split, /class="split"/);
     assert.equal(split.includes('class="set-row"'), false);
+    assert.match(split, /data-proto-go="D"/);
+    const current = renderPrototypePage(view(), "D");
+    assert.match(current, /D · 原本/);
+    assert.match(current, /class="proto-bar"/);
+    assert.match(current, /class="brand-title">VPod/);
+    assert.match(current, /name="prototype_variant" value="D"/);
+    assert.equal(renderPage(view()).includes("proto-bar"), false);
     const official = renderPage(view());
     assert.match(official, /class="modules"/);
     assert.match(official, /class="display"/);

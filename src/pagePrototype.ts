@@ -1,16 +1,18 @@
-// PROTOTYPE — throwaway. A–C only, switchable via ?variant= when not in production.
+// PROTOTYPE — throwaway. A–D, switchable via ?variant= when not in production.
+// D is the official page plus the switcher. The served page without ?variant= stays src/page.ts.
 import type { ClassroomAppView } from "./classroomApp";
-import { classroomBlocks } from "./page";
+import { classroomBlocks, renderPage } from "./page";
 
 const PRODUCT = "凡思課堂安裝";
 
-export const PROTOTYPE_VARIANTS = ["A", "B", "C"] as const;
+export const PROTOTYPE_VARIANTS = ["A", "B", "C", "D"] as const;
 export type PrototypeVariant = (typeof PROTOTYPE_VARIANTS)[number];
 
 const VARIANT_NAME: Record<PrototypeVariant, string> = {
   A: "側欄控制台",
   B: "設定清單",
   C: "工作區",
+  D: "原本",
 };
 
 const SECTIONS = [
@@ -492,7 +494,44 @@ function clientScript(variant: PrototypeVariant): string {
   `;
 }
 
+function variantD(view: ClassroomAppView): string {
+  const html = stamp(renderPage(view), "D");
+  const bar = `<style>
+    .proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 80; width: min(440px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 6px; align-items: center; }
+    .proto-state { width: 100%; max-height: 88px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: 10px; background: #111; color: #f4f4f4; border: 2px solid #f5c518; font-size: 10px; line-height: 1.35; }
+    .proto-pill { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 999px; background: #111; color: #fff; border: 2px solid #f5c518; box-shadow: 0 8px 24px rgba(0,0,0,0.28); }
+    .proto-pill button { width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 999px; background: #f5c518; color: #111; font-weight: 700; }
+    .proto-pill span { font-size: 13px; font-weight: 600; min-width: 9rem; text-align: center; }
+  </style>
+  ${switcher("D", stateText(view))}
+  <script>
+    document.addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.closest) return;
+      var jump = target.closest("[data-proto-go]");
+      if (!jump) return;
+      var url = new URL(location.href);
+      url.searchParams.set("variant", jump.getAttribute("data-proto-go"));
+      location.assign(url.pathname + url.search);
+    });
+    window.addEventListener("keydown", function (event) {
+      var tag = event.target && event.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || (event.target && event.target.isContentEditable)) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      var order = ${JSON.stringify(PROTOTYPE_VARIANTS)};
+      var index = order.indexOf("D");
+      var step = event.key === "ArrowRight" ? 1 : -1;
+      var next = order[(index + step + order.length) % order.length];
+      var url = new URL(location.href);
+      url.searchParams.set("variant", next);
+      location.assign(url.pathname + url.search);
+    });
+  </script>`;
+  return html.replace("</body>", `${bar}</body>`);
+}
+
 export function renderPrototypePage(view: ClassroomAppView, variant: PrototypeVariant): string {
+  if (variant === "D") return variantD(view);
   const blocks = classroomBlocks(view);
   const body =
     variant === "A"
