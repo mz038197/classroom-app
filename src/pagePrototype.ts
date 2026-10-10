@@ -2,10 +2,12 @@
 // Four variants of the classroom install page, switchable via ?variant=, on the existing / route.
 // A–C use the opencodex console grammar. D is the current production layout.
 // Default render without ?variant= stays the production page.
+import { createRequire } from "node:module";
 import type { ClassroomAppView } from "./classroomApp";
 import { classroomBlocks, renderPage } from "./page";
 
 const PRODUCT = "凡思課堂安裝";
+const VERSION = `v${createRequire(__filename)("../package.json").version as string}`;
 
 export const PROTOTYPE_VARIANTS = ["A", "B", "C", "D"] as const;
 export type PrototypeVariant = (typeof PROTOTYPE_VARIANTS)[number];
@@ -544,6 +546,10 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
       "",
     );
   }
+  html = html.replaceAll(
+    `<h1 class="gradient-text">${PRODUCT}</h1>`,
+    `<h1 class="brand-title">VPod</h1><span class="ver">${VERSION}</span>`,
+  );
   html = html.replace(
     `<div class="modules">`,
     `<header class="page-head"><h2>教室設定</h2><p>連線、資料夾、模型與環境。</p></header><div class="modules">`,
@@ -560,7 +566,8 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     .bar { position: sticky; top: 0; align-self: start; height: 100dvh; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px; padding: 18px 14px; border-bottom: 0; border-right: 1px solid var(--line); }
     .bar .brand { padding: 6px 8px 14px; }
     .bar .logo-badge { width: 28px; height: 28px; }
-    .bar .gradient-text { font-size: 15px; }
+    .bar .brand-title, .mobile-top .brand-title { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0; line-height: 26px; color: light-dark(#0d0d0d, #ececec); background: none; -webkit-text-fill-color: currentColor; white-space: nowrap; }
+    .brand .ver { align-self: center; flex: 0 0 auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; line-height: 1.2; color: var(--muted); background: light-dark(#f4f4f4, #303030); border: 1px solid light-dark(#e6e6e6, #3d3d3d); padding: 2px 6px; border-radius: 999px; white-space: nowrap; }
     .bar nav { display: flex; flex-direction: column; }
     .side-item { align-self: stretch; justify-content: flex-start; min-height: 36px; padding: 8px 10px; border-radius: 8px; background: light-dark(rgba(13, 13, 13, 0.06), rgba(255, 255, 255, 0.09)); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; }
     .bar [data-appearance-toggle] { margin-top: auto; align-self: flex-start; }
@@ -570,7 +577,7 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
       body { display: block; }
       .mobile-top { display: flex; position: sticky; top: 0; z-index: 20; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--bar); backdrop-filter: blur(24px) saturate(160%); }
       .mobile-top .brand { flex: 1; min-width: 0; padding: 4px; }
-      .mobile-top .gradient-text { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .mobile-top .brand-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       .menu-toggle { display: grid; place-items: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text); }
       .menu-toggle svg { width: 20px; height: 20px; }
       .bar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; width: min(280px, 84vw); height: 100dvh; transform: translateX(-100%); visibility: hidden; border-right: 1px solid var(--line); background: light-dark(rgba(242, 242, 247, 0.97), rgba(12, 12, 14, 0.96)); }

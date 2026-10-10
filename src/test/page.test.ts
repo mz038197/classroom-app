@@ -75,7 +75,9 @@ describe("Classroom App page", () => {
     assert.match(original, /\.tile \{ border: 1px solid light-dark\(#e6e6e6, #3d3d3d\); \}/);
     assert.match(original, /\.display \{ display: none; \}/);
     assert.match(original, /class="page-head"><h2>教室設定<\/h2><p>連線、資料夾、模型與環境。<\/p>/);
-    assert.equal(renderPage(view()).includes("連線、資料夾、模型與環境。"), false);
+    assert.match(original, /class="brand-title">VPod</);
+    assert.equal(renderPage(view()).includes("VPod"), false);
+    assert.equal(renderPage(view()).includes('class="ver"'), false);
     assert.match(original, /grid-template-columns: 232px/);
     assert.match(original, /translateX\(-100%\)/);
     assert.equal(renderPage(view()).includes("教室設定"), false);
