@@ -507,6 +507,30 @@ function escapeText(value: string): string {
     .replaceAll('"', "&quot;");
 }
 
+function splitCourseCards(html: string): string {
+  const commandMatch = html.match(
+    /<section class="tile wide"><h2>指令<\/h2>([\s\S]*?)<\/section>/,
+  );
+  const courseMatch = html.match(
+    /<section class="tile wide"><h2>課程<\/h2>([\s\S]*?)<\/section>/,
+  );
+  if (!commandMatch || !courseMatch) return html;
+  const commandBody = commandMatch[1].includes("沒有待確認的指令。")
+    ? ""
+    : commandMatch[1];
+  const snippetHeading = "<h3>本課片段</h3>";
+  const snippetAt = courseMatch[1].indexOf(snippetHeading);
+  const courseBody =
+    snippetAt === -1 ? courseMatch[1] : courseMatch[1].slice(0, snippetAt);
+  const snippetBody =
+    snippetAt === -1
+      ? `<p class="empty">這堂課沒有片段。</p>`
+      : courseMatch[1].slice(snippetAt + snippetHeading.length);
+  const install = `<section class="tile wide"><div class="tile-head"><h2>課程安裝</h2></div>${courseBody}${commandBody}</section>`;
+  const snippets = `<section class="tile wide"><div class="tile-head"><h2>課程片段</h2></div>${snippetBody}</section>`;
+  return html.replace(commandMatch[0], install).replace(courseMatch[0], snippets);
+}
+
 function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string {
   const tag = view.connected
     ? `<span class="badge">已連線</span>`
@@ -523,6 +547,57 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     `<button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
     `<nav aria-label="選單"><button type="button" class="side-item" aria-current="page">教室設定</button></nav><button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
   );
+  const folderTag = view.projectFolder
+    ? `<span class="badge">已設定</span>`
+    : `<span class="badge off">未設定</span>`;
+  const folderOff = view.commandRunning ? " disabled" : "";
+  const folderInput = view.projectFolder
+    ? ` value="${escapeText(view.projectFolder)}"`
+    : "";
+  const folderError = view.folderError
+    ? `<p class="error">${escapeText(view.folderError)}</p>`
+    : "";
+  html = html.replace(
+    `<section class="tile"><h2>資料夾</h2>`,
+    `<section class="tile"><div class="tile-head"><h2>資料夾</h2>${folderTag}</div>`,
+  );
+  html = html.replace(
+    /<form class="stack" method="post" action="\/project-folder">[\s\S]*?<\/form>/,
+    `<form class="stack" method="post" action="/project-folder"><input type="hidden" name="prototype_variant" value="${variant}"><label>專案資料夾 <input name="project_folder" autocomplete="off" placeholder="還沒選擇"${folderInput}${folderOff}></label>${folderError}</form><form method="post" action="/pick-folder"><input type="hidden" name="prototype_variant" value="${variant}"><button type="submit"${folderOff}>設定</button></form>`,
+  );
+  const modelTag =
+    view.mode === "classroom"
+      ? `<span class="badge">課堂</span>`
+      : `<span class="badge off">個人</span>`;
+  const modelValue =
+    view.mode === "classroom"
+      ? escapeText(view.modelId || "尚未載入")
+      : "使用自己的帳號";
+  html = html.replace(
+    `<section class="tile"><h2>模型</h2>`,
+    `<section class="tile"><div class="tile-head"><h2>模型</h2>${modelTag}</div>`,
+  );
+  html = html.replace(
+    /<p class="mode-line">[\s\S]*?<\/p>/,
+    `<label>目前模型 <div class="model-value">${modelValue}</div></label>`,
+  );
+  html = html.replaceAll(">Classroom</button>", ">課堂</button>");
+  html = html.replaceAll(">Native</button>", ">個人</button>");
+  const envReady = view.tools.length > 0 && view.tools.every((tool) => tool.installed);
+  const envTag = envReady
+    ? `<span class="badge">已就緒</span>`
+    : `<span class="badge off">未完成</span>`;
+  html = html.replace(
+    `<section class="tile"><h2>環境</h2>`,
+    `<section class="tile"><div class="tile-head"><h2>環境</h2>${envTag}</div>`,
+  );
+  html = html.replaceAll(`<em>未安裝</em>`, `<em class="missing">未安裝</em>`);
+  if (!view.tools.some((tool) => tool.selected)) {
+    html = html.replace(
+      `<button type="submit" class="go">確認安裝</button>`,
+      `<button type="submit" class="go" disabled>確認安裝</button>`,
+    );
+  }
   if (view.connected && view.canCopyKey) {
     const off = view.commandRunning ? " disabled" : "";
     const hidden = `<input type="hidden" name="prototype_variant" value="${variant}">`;
@@ -554,6 +629,7 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     `<div class="modules">`,
     `<header class="page-head"><h2>教室設定</h2><p>連線、資料夾、模型與環境。</p></header><div class="modules">`,
   );
+  html = splitCourseCards(html);
   const extra = `<style>
     .proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 80; width: min(440px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 6px; align-items: center; }
     .proto-state { width: 100%; max-height: 88px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: 10px; background: #111; color: #f4f4f4; border: 2px solid #f5c518; font-size: 10px; line-height: 1.35; }
@@ -590,7 +666,19 @@ function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string
     .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(16, 163, 127, 0.10), rgba(78, 203, 157, 0.13)); color: light-dark(#0a7d5c, #4ecb9d); font-size: 12px; font-weight: 600; }
     .badge.off { background: light-dark(#f4f4f4, #303030); color: light-dark(#6e6e6e, #a6a6a6); }
     .welcome { font-size: 1.15rem; font-weight: 700; }
-    .course-title { font-size: 1rem; font-weight: 600; }
+    .course-title { font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
+    .model-value { min-height: 2.75rem; border-radius: 10px; background: var(--input); padding: 0.55rem 0.8rem; display: flex; align-items: center; overflow-wrap: anywhere; }
+    .tool em { color: var(--text); }
+    .tool em.missing { color: var(--muted); }
+    .restart { color: light-dark(#9a4a08, #fbbf24); }
+    [data-appearance="dark"] { --bg: #212121; }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-appearance="light"]) { --bg: #212121; }
+    }
+    form[action="/pick-folder"] { margin-top: auto; }
+    form[action="/reload"] { margin-top: auto; }
+    form[action="/environment"] { flex: 1; }
+    form[action="/environment"] > button { margin-top: auto; }
     .session-sub { color: var(--muted); font-size: 0.85rem; }
     .key-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .copy-icon { width: 2.75rem; min-height: 2.75rem; padding: 0; display: grid; place-items: center; }

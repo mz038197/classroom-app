@@ -75,6 +75,100 @@ describe("Classroom App page", () => {
     assert.match(original, /\.tile \{ border: 1px solid light-dark\(#e6e6e6, #3d3d3d\); \}/);
     assert.match(original, /\.display \{ display: none; \}/);
     assert.match(original, /class="page-head"><h2>教室設定<\/h2><p>連線、資料夾、模型與環境。<\/p>/);
+    assert.match(original, /class="badge off">個人</);
+    assert.match(original, /目前模型/);
+    assert.match(original, /使用自己的帳號/);
+    assert.match(original, />課堂</);
+    assert.match(original, />個人</);
+    assert.match(original, /<h2>環境<\/h2><span class="badge off">未完成<\/span>/);
+    assert.match(original, /<em class="missing">未安裝<\/em>/);
+    assert.match(original, /<h2>課程安裝<\/h2>/);
+    assert.match(original, /<h2>課程片段<\/h2>/);
+    assert.match(original, /這堂課沒有片段。/);
+    assert.equal(original.includes("<h2>指令</h2>"), false);
+    assert.equal(original.includes("<h2>課程</h2>"), false);
+    const withSnippet = renderPrototypePage(
+      view({
+        catalog: {
+          source: "local",
+          actions: [
+            {
+              id: "tools",
+              title: "安裝 tools",
+              kind: "package",
+              command: "echo hi",
+            },
+          ],
+          snippets: [
+            { id: "stub", title: "骨架", body: "print(1)\n", pasteHint: "main.py" },
+          ],
+        },
+        pendingCommand: "echo hi",
+      }),
+      "D",
+    );
+    assert.match(withSnippet, /安裝 tools/);
+    assert.match(withSnippet, /echo hi/);
+    assert.match(withSnippet, /骨架/);
+    assert.equal(withSnippet.includes("<h3>本課片段</h3>"), false);
+    assert.equal(withSnippet.includes("這堂課沒有片段。"), false);
+    const installAt = withSnippet.indexOf("<h2>課程安裝</h2>");
+    const snippetAt = withSnippet.indexOf("<h2>課程片段</h2>");
+    const actionAt = withSnippet.indexOf("安裝 tools");
+    const titleAt = withSnippet.indexOf("骨架");
+    assert.equal(installAt < snippetAt, true);
+    assert.equal(actionAt < snippetAt && titleAt > snippetAt, true);
+    assert.equal(renderPage(view()).includes("課程安裝"), false);
+    assert.match(original, /重新載入/);
+    const readyTools = [
+      { id: "uv" as const, label: "uv", installed: true, selected: false },
+      { id: "git" as const, label: "git", installed: true, selected: false },
+      { id: "node" as const, label: "Node.js", installed: true, selected: false },
+      { id: "pwsh" as const, label: "PowerShell 7", installed: true, selected: false },
+    ];
+    const ready = renderPrototypePage(view({ tools: readyTools }), "D");
+    assert.match(ready, /<h2>環境<\/h2><span class="badge">已就緒<\/span>/);
+    const nonePicked = renderPrototypePage(view({ installAvailable: true }), "D");
+    assert.match(nonePicked, /class="go" disabled>確認安裝/);
+    const onePicked = renderPrototypePage(
+      view({
+        installAvailable: true,
+        tools: [
+          { id: "uv", label: "uv", installed: false, selected: true },
+          { id: "git", label: "git", installed: false, selected: false },
+          { id: "node", label: "Node.js", installed: true, selected: false },
+          { id: "pwsh", label: "PowerShell 7", installed: false, selected: false },
+        ],
+      }),
+      "D",
+    );
+    assert.match(onePicked, /class="go">確認安裝/);
+    assert.equal(renderPage(view()).includes("已就緒"), false);
+    const classroom = renderPrototypePage(
+      view({ mode: "classroom", modelId: "gpt", mustRestart: ["codex"] }),
+      "D",
+    );
+    assert.match(classroom, /class="badge">課堂</);
+    assert.match(classroom, /class="model-value">gpt</);
+    assert.match(classroom, /請完全退出 Codex，再重新打開。/);
+    assert.match(original, /\.restart \{ color: light-dark\(#9a4a08, #fbbf24\); \}/);
+    assert.match(original, /:root:not\(\[data-appearance="light"\]\) \{ --bg: #212121; \}/);
+    assert.equal(renderPage(view()).includes("--bg: #212121"), false);
+    assert.equal(renderPage(view()).includes("使用自己的帳號"), false);
+    assert.equal(renderPage(view()).includes(">Classroom</button>"), true);
+    assert.match(original, /class="badge off">未設定</);
+    assert.match(original, /action="\/pick-folder"/);
+    assert.match(original, />設定</);
+    assert.equal(original.includes("設定專案資料夾"), false);
+    const picked = renderPrototypePage(view({ projectFolder: "D:\\lesson" }), "D");
+    assert.match(picked, /class="badge">已設定</);
+    assert.match(original, /placeholder="還沒選擇"/);
+    assert.match(original, /name="project_folder"/);
+    assert.equal(original.includes("安裝課程時會寫進這裡。"), false);
+    assert.match(picked, /value="D:\\lesson"/);
+    const bad = renderPrototypePage(view({ folderError: "這不是資料夾。" }), "D");
+    assert.match(bad, /這不是資料夾。/);
+    assert.equal(renderPage(view()).includes("設定專案資料夾"), true);
     assert.match(original, /class="brand-title">VPod</);
     assert.equal(renderPage(view()).includes("VPod"), false);
     assert.equal(renderPage(view()).includes('class="ver"'), false);

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -417,6 +417,35 @@ function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
   });
 }
 
+function pickProjectFolder(): Promise<string | undefined> {
+  if (process.platform !== "win32") return Promise.resolve(undefined);
+  const command = [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$owner = New-Object System.Windows.Forms.Form",
+    "$owner.TopMost = $true",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    "$dialog.Description = '選擇專案資料夾'",
+    "$dialog.ShowNewFolderButton = $true",
+    "if ($dialog.ShowDialog($owner) -eq 'OK') { $dialog.SelectedPath }",
+    "$owner.Dispose()",
+  ].join("; ");
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-STA", "-Command", command],
+      { timeout: 120_000 },
+      (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        const picked = stdout.replaceAll("\r", "").trim();
+        resolve(picked || undefined);
+      },
+    );
+  });
+}
+
 function redirect(res: http.ServerResponse, location = "/"): void {
   res.writeHead(303, { Location: location });
   res.end();
@@ -694,9 +723,21 @@ async function main(): Promise<void> {
         goHome(params);
         return;
       }
+      if (req.method === "POST" && pathname === "/pick-folder") {
+        const params = new URLSearchParams(await readBody(req));
+        const picked = await pickProjectFolder();
+        if (picked) await app.setProjectFolder(picked);
+        goHome(params);
+        return;
+      }
       if (req.method === "POST" && pathname === "/project-folder") {
         const params = new URLSearchParams(await readBody(req));
-        await app.setProjectFolder(params.get("project_folder") ?? "");
+        const raw = (params.get("project_folder") ?? "").trim();
+        if (!raw || (await fs.stat(raw).then((info) => info.isDirectory()).catch(() => false))) {
+          await app.setProjectFolder(raw);
+        } else {
+          app.rejectProjectFolder();
+        }
         goHome(params);
         return;
       }

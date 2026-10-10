@@ -153,6 +153,7 @@ export type ClassroomAppView = {
   canCopyKey: boolean;
   notice?: string;
   projectFolder?: string;
+  folderError?: string;
   installAvailable: boolean;
   installNotice?: string;
   catalog?: CourseCatalogView;
@@ -181,6 +182,7 @@ export class ClassroomApp {
   private detail = "";
   private notice: string | undefined;
   private projectFolder: string | undefined;
+  private folderError: string | undefined;
   private catalog: CourseCatalogView | undefined;
   private catalogError: string | undefined;
   private remoteCatalogHeld = false;
@@ -235,6 +237,9 @@ export class ClassroomApp {
       view.projectFolder = this.projectFolder;
     } else {
       view.installNotice = INSTALL_UNAVAILABLE;
+    }
+    if (this.folderError) {
+      view.folderError = this.folderError;
     }
     if (this.catalog) {
       view.catalog = this.catalog;
@@ -527,10 +532,15 @@ export class ClassroomApp {
       return;
     }
     const next = folder.trim();
+    this.folderError = undefined;
     this.projectFolder = next || undefined;
     if (!this.remoteCatalogHeld) {
       await this.loadCatalog();
     }
+  }
+
+  rejectProjectFolder(): void {
+    this.folderError = "這不是資料夾。";
   }
 
   async setSwitch(mode: ModelSwitchMode): Promise<void> {
