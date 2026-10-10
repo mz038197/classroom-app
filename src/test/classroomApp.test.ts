@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { renderPage } from "../page";
 import {
   ClassroomApp,
   type EnvironmentToolId,
@@ -31,7 +32,8 @@ function harness(
     catalogBody?: { course_catalog_yaml?: unknown };
     catalogError?: Error;
     files?: Record<string, string | undefined>;
-    run?: (cwd: string, command: string) => Promise<string>;
+    run?: (cwd: string, command: string, onOutput?: (output: string) => void) => Promise<string>;
+    runExitCode?: number;
     write?: (path: string, contents: string) => Promise<void>;
     sessionModels?: (apiKey: string) => Promise<string[]>;
     codex?: Record<string, unknown>;
@@ -134,12 +136,12 @@ function harness(
       },
     },
     commands: {
-      async run(cwd, command) {
+      async run(cwd, command, onOutput) {
         runCalls.push({ cwd, command });
         if (options?.run) {
-          return options.run(cwd, command);
+          return { output: await options.run(cwd, command, onOutput), exitCode: options.runExitCode ?? 0 };
         }
-        return "ok";
+        return { output: "ok", exitCode: options?.runExitCode ?? 0 };
       },
     },
     files: {
@@ -1176,6 +1178,103 @@ describe("route addresses", () => {
 });
 
 describe("confirm one catalog command", () => {
+  it("marks only the successful action as installed in its project folder", async () => {
+    const { app } = harness(undefined, {
+      catalogYaml: `actions:
+  - id: first
+    title: First
+    kind: package
+    command: echo installed
+  - id: second
+    title: Second
+    kind: package
+    command: echo installed
+`,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    assert.deepEqual(app.view().installedActionIds, []);
+    app.prepare("first");
+    await app.confirm();
+    assert.deepEqual(app.view().installedActionIds, ["first"]);
+    assert.equal((renderPage(app.view()).match(/class="badge installed-tag"/g) ?? []).length, 1);
+    await app.setProjectFolder("D:\\other");
+    assert.deepEqual(app.view().installedActionIds, []);
+    assert.doesNotMatch(renderPage(app.view()), /class="badge installed-tag"/);
+    await app.setProjectFolder("D:\\lesson");
+    assert.deepEqual(app.view().installedActionIds, ["first"]);
+  });
+
+  it("does not mark a failed or canceled installation as installed", async () => {
+    const { app } = harness(undefined, { runExitCode: 1 });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    app.cancel();
+    assert.deepEqual(app.view().installedActionIds, []);
+    app.prepare("demo");
+    await app.confirm();
+    assert.deepEqual(app.view().installedActionIds, []);
+    assert.doesNotMatch(renderPage(app.view()), /class="badge installed-tag"/);
+  });
+  it("marks nonzero command exits as failed even when the runner resolves", async () => {
+    const { app } = harness(undefined, {
+      run: async () => "dependency failed\n",
+      runExitCode: 7,
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    assert.equal(app.view().commandSucceeded, false);
+    assert.equal(app.view().commandOutput, "dependency failed\n");
+    app.prepare("demo");
+    assert.equal(app.view().commandSucceeded, undefined);
+  });
+  it("publishes partial output while installing and clears the dialog when done", async () => {
+    let finish!: (output: string) => void;
+    let publish!: (output: string) => void;
+    const waiting = new Promise<string>((resolve) => { finish = resolve; });
+    const { app } = harness(undefined, {
+      run: async (_cwd, _command, onOutput) => {
+        publish = onOutput!;
+        return waiting;
+      },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    const installing = app.confirm();
+    publish("Downloading demo…\n");
+    assert.equal(app.view().commandRunning, true);
+    assert.equal(app.view().commandOutput, "Downloading demo…\n");
+    publish("Downloading demo…\nInstalling…\n");
+    assert.equal(app.view().commandOutput, "Downloading demo…\nInstalling…\n");
+    finish("Installed 1 package\n");
+    await installing;
+    assert.equal(app.view().commandRunning, false);
+    assert.equal(app.view().pendingCommand, undefined);
+    assert.equal(app.view().commandOutput, "Installed 1 package\n");
+    assert.equal(app.view().commandSucceeded, true);
+  });
+  it("closes the confirmation dialog after installation and keeps the output", async () => {
+    const { app, runCalls } = harness(undefined, {
+      run: async () => "Installed 1 package\n",
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    assert.match(renderPage(app.view()), /class="confirm-dialog"/);
+    await app.confirm();
+    assert.doesNotMatch(renderPage(app.view()), /class="confirm-dialog"/);
+    assert.equal(app.view().pendingCommand, undefined);
+    assert.equal(app.view().commandOutput, "Installed 1 package\n");
+    await app.confirm();
+    assert.equal(runCalls.length, 1);
+    app.prepare("demo");
+    assert.match(renderPage(app.view()), /class="confirm-dialog"/);
+  });
+
   it("prepare puts that action's full command on the view and does not run it", async () => {
     const { app, runCalls } = harness();
     await app.setProjectFolder("D:\\lesson");
@@ -1196,6 +1295,23 @@ describe("confirm one catalog command", () => {
     await app.confirm();
     assert.equal(runCalls.length, 1);
     assert.equal(JSON.stringify(app.view()).includes(KEY), false);
+  });
+
+  it("keeps an execution failure visible after closing the confirmation dialog", async () => {
+    const { app } = harness(undefined, {
+      run: async () => { throw new Error("runner failed"); },
+    });
+    await app.setProjectFolder("D:\\lesson");
+    await app.redeem("ABC12345", "Ada");
+    app.prepare("demo");
+    await app.confirm();
+    const view = app.view();
+    assert.equal(view.pendingCommand, undefined);
+    assert.equal(view.commandRunning, false);
+    assert.equal(view.commandOutput, "指令執行失敗。");
+    assert.equal(view.commandSucceeded, false);
+    assert.doesNotMatch(renderPage(view), /class="confirm-dialog"/);
+    assert.match(renderPage(view), /指令執行失敗。/);
   });
 
   it("cancel clears the pending command and does not run it", async () => {

@@ -133,7 +133,8 @@ describe("Classroom App page", () => {
     assert.equal(withSnippet.includes("<h3>指令輸出</h3>"), false);
     const outputted = renderPage(
       view({ commandOutput: "Installed 1 package\n" }));
-    assert.match(outputted, /<details class="command-output"><summary>指令輸出<\/summary>/);
+    assert.equal(outputted.includes('class="command-output"'), false);
+    assert.equal(outputted.includes("Installed 1 package"), false);
     assert.equal(outputted.includes('class="confirm-dialog"'), false);
     assert.match(withSnippet, /骨架/);
     assert.equal(withSnippet.includes("<h3>本課片段</h3>"), false);

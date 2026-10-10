@@ -3,6 +3,7 @@ import {
   type InstallAction,
   type LessonSnippet,
 } from "./courseCatalog";
+import type { CommandResult } from "./commandRunner";
 import {
   VS_CODE_ENV,
   anthropicBaseValues,
@@ -60,7 +61,7 @@ export type ClassroomAppDeps = {
     write(text: string): Promise<void>;
   };
   commands: {
-    run(cwd: string, command: string): Promise<string>;
+    run(cwd: string, command: string, onOutput?: (output: string) => void): Promise<CommandResult>;
   };
   environment: {
     probe(tool: EnvironmentToolId): Promise<{ installed: boolean }>;
@@ -161,6 +162,8 @@ export type ClassroomAppView = {
   pendingCommand?: string;
   commandOutput?: string;
   commandRunning: boolean;
+  commandSucceeded?: boolean;
+  installedActionIds?: string[];
   mode: ModelSwitchMode;
   modelId?: string;
   tools: EnvironmentToolView[];
@@ -187,8 +190,11 @@ export class ClassroomApp {
   private catalogError: string | undefined;
   private remoteCatalogHeld = false;
   private pendingCommand: string | undefined;
+  private pendingActionId: string | undefined;
+  private installedActions = new Map<string, Map<string, string>>();
   private commandOutput: string | undefined;
   private commandRunning = false;
+  private commandSucceeded: boolean | undefined;
   private mode: ModelSwitchMode = "native";
   private modelIds: string[] = [];
   private environmentInstalled: Record<EnvironmentToolId, boolean> = {
@@ -243,6 +249,10 @@ export class ClassroomApp {
     }
     if (this.catalog) {
       view.catalog = this.catalog;
+      const installed = this.installedActions.get(this.projectFolder ?? "");
+      view.installedActionIds = this.catalog.actions
+        .filter((action) => installed?.get(action.id) === action.command)
+        .map((action) => action.id);
     }
     if (this.catalogError) {
       view.catalogError = this.catalogError;
@@ -253,6 +263,7 @@ export class ClassroomApp {
     if (this.commandOutput !== undefined) {
       view.commandOutput = this.commandOutput;
     }
+    if (this.commandSucceeded !== undefined) view.commandSucceeded = this.commandSucceeded;
     if (this.mode === "classroom" && this.modelIds[0]) {
       view.modelId = this.modelIds[0];
     }
@@ -464,7 +475,9 @@ export class ClassroomApp {
       return;
     }
     this.pendingCommand = action.command;
+    this.pendingActionId = action.id;
     this.commandOutput = undefined;
+    this.commandSucceeded = undefined;
   }
 
   async confirm(): Promise<void> {
@@ -473,13 +486,30 @@ export class ClassroomApp {
     }
     const cwd = this.projectFolder;
     const command = this.pendingCommand;
+    const actionId = this.pendingActionId;
     this.commandRunning = true;
     this.commandOutput = undefined;
+    this.commandSucceeded = undefined;
     try {
-      this.commandOutput = await this.deps.commands.run(cwd, command);
+      const result = await this.deps.commands.run(cwd, command, (output) => {
+        this.commandOutput = output;
+      });
+      this.commandOutput = result.output;
+      this.commandSucceeded = result.exitCode === 0;
+      if (this.commandSucceeded && actionId) {
+        let installed = this.installedActions.get(cwd);
+        if (!installed) {
+          installed = new Map();
+          this.installedActions.set(cwd, installed);
+        }
+        installed.set(actionId, command);
+      }
     } catch {
       this.commandOutput = "指令執行失敗。";
+      this.commandSucceeded = false;
     } finally {
+      this.pendingCommand = undefined;
+      this.pendingActionId = undefined;
       this.commandRunning = false;
     }
   }
@@ -489,6 +519,7 @@ export class ClassroomApp {
       return;
     }
     this.pendingCommand = undefined;
+    this.pendingActionId = undefined;
   }
 
   async redeem(inviteCode: string, nickname: string): Promise<void> {

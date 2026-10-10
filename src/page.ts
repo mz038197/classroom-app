@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { resolveAppearance } from "./appearance";
+import { installProgressScript } from "./installProgress";
 import type { ClassroomAppView } from "./classroomApp";
 import {
   actionKindLabel,
@@ -568,7 +569,10 @@ function installActionCards(view: ClassroomAppView): string {
       const description = action.description
         ? `<p class="hint">${escapeHtml(action.description)}</p>`
         : "";
-      return `<article class="install-card"><div class="install-top"><span class="kind-tag">${escapeHtml(actionKindLabel(action.kind))}</span><strong>${escapeHtml(action.title)}</strong></div>${description}<form method="post" action="/prepare"><input type="hidden" name="action_id" value="${escapeHtml(action.id)}"><button type="submit"${off}>安裝</button></form></article>`;
+      const installed = view.installedActionIds?.includes(action.id)
+        ? `<span class="badge installed-tag">已安裝</span>`
+        : "";
+      return `<article class="install-card"><div class="install-top"><span data-kind="${escapeHtml(action.kind)}" class="kind-tag">${escapeHtml(actionKindLabel(action.kind))}</span><strong>${escapeHtml(action.title)}</strong>${installed}</div>${description}<form method="post" action="/prepare"><input type="hidden" name="action_id" value="${escapeHtml(action.id)}"><button type="submit"${off}>安裝</button></form></article>`;
     })
     .join("");
 }
@@ -579,13 +583,13 @@ function presentCommand(body: string): { inline: string; dialog: string } {
   const choices = inline.match(/<div class="choices">[\s\S]*?<\/div>/);
   let dialog = "";
   if (pending) {
-    dialog = `<div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><div class="confirm-panel"><h2 id="confirm-title">確認安裝</h2>${pending[0]}${choices?.[0] ?? ""}</div></div>`;
+    dialog = `<div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><div class="confirm-panel"><h2 id="confirm-title">確認安裝</h2>${pending[0]}<p data-install-status role="status" aria-live="polite"></p><pre data-install-output aria-label="安裝輸出" hidden></pre>${choices?.[0] ?? ""}<button type="button" data-install-dismiss hidden>確認</button></div></div>`;
     inline = inline.replace(pending[0], "");
     if (choices) inline = inline.replace(choices[0], "");
   }
   inline = inline.replace(
     /<h3>指令輸出<\/h3>(<pre>[\s\S]*?<\/pre>)/,
-    `<details class="command-output"><summary>指令輸出</summary>$1</details>`,
+    "",
   );
   return { inline, dialog };
 }
@@ -774,16 +778,21 @@ export function renderPage(view: ClassroomAppView): string {
     .tool em.missing { color: var(--muted); }
     .install-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line); }
     .install-card:first-of-type { border-top: 0; padding-top: 0; }
-    .install-top { display: flex; align-items: center; gap: 8px; }
+    .install-top { display: flex; align-items: center; gap: 8px; width: 100%; }
+    .install-top strong { min-width: 0; overflow-wrap: anywhere; }
+    .installed-tag { margin-left: auto; flex-shrink: 0; background: light-dark(#d1fae5, #163c30); color: light-dark(#065f46, #6ee7b7); }
     .kind-tag { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(13, 13, 13, 0.06), rgba(255, 255, 255, 0.09)); color: var(--muted); font-size: 12px; font-weight: 600; }
+    .kind-tag[data-kind="package"] { background: light-dark(#dbeafe, #172f50); color: light-dark(#1e40af, #93c5fd); }
+    .kind-tag[data-kind="skill"] { background: light-dark(#ede9fe, #35254e); color: light-dark(#6d28d9, #c4b5fd); }
+    .kind-tag[data-kind="mcp"] { background: light-dark(#d1fae5, #163c30); color: light-dark(#065f46, #6ee7b7); }
     .confirm-dialog { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: light-dark(rgba(20, 20, 20, 0.32), rgba(0, 0, 0, 0.52)); }
     .confirm-panel { width: min(36rem, 100%); max-height: min(70vh, 32rem); overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; background: var(--tile); border: 1px solid var(--line); }
     .confirm-panel h2 { font-size: 20px; font-weight: 600; color: var(--text); }
     .confirm-panel pre { max-height: 40vh; overflow: auto; }
+    .confirm-panel .pending { padding: 14px 16px; border-radius: 10px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; flex-shrink: 0; color-scheme: dark; }
+    .confirm-panel [hidden] { display: none; }
     .confirm-panel button { min-height: 34px; padding: 8px 16px; border-radius: 999px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 500; }
     .confirm-panel button.quiet { background: light-dark(#ffffff, #212121); color: light-dark(#0d0d0d, #ececec); border-color: light-dark(#e6e6e6, #3d3d3d); }
-    .command-output summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
-    .command-output pre { margin-top: 8px; }
     .restart { color: light-dark(#9a4a08, #fbbf24); }
     [data-appearance="dark"] { --bg: #212121; }
     @media (prefers-color-scheme: dark) {
@@ -808,6 +817,6 @@ export function renderPage(view: ClassroomAppView): string {
     main button.copy-icon { width: 34px; min-height: 34px; padding: 0; }
     .copy-icon svg { width: 1.15rem; height: 1.15rem; }
   </style>
-  <script>${drawerScript()}</script>`;
+  <script>${drawerScript()}${installProgressScript}</script>`;
   return html.replace("</body>", `${extra}</body>`);
 }

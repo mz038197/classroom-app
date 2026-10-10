@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -16,6 +16,8 @@ import {
   type UpstreamTarget,
 } from "./classroomApp";
 import { renderPage } from "./page";
+import { pickProjectFolder } from "./folderPicker";
+import { collectOutput, shellLaunch, runCommand } from "./commandRunner";
 import { isPrototypeVariant, renderPrototypePage } from "./pagePrototype";
 import { createRouteFiles } from "./routeFiles";
 import { decodeRequestBody, ResponsesSse, responsesToChatBody, toolKindsFromResponses } from "./responsesChat";
@@ -246,55 +248,6 @@ function isEnvironmentTool(value: string): value is EnvironmentToolId {
 const MAC_PWSH_PAGE =
   "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-macos";
 
-function collectOutput(
-  command: string,
-  args: string[],
-  cwd?: string,
-): Promise<{ exitCode: number | undefined; output: string; spawnError: boolean }> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (result: {
-      exitCode: number | undefined;
-      output: string;
-      spawnError: boolean;
-    }) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(result);
-    };
-    const child = spawn(command, args, {
-      cwd,
-      windowsHide: process.platform === "win32",
-    });
-    const chunks: Buffer[] = [];
-    child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.on("error", () => {
-      finish({
-        exitCode: 1,
-        output: Buffer.concat(chunks).toString("utf8"),
-        spawnError: true,
-      });
-    });
-    child.on("close", (code) => {
-      finish({
-        exitCode: code === null ? undefined : code,
-        output: Buffer.concat(chunks).toString("utf8"),
-        spawnError: false,
-      });
-    });
-  });
-}
-
-function shellLaunch(command: string): { command: string; args: string[] } {
-  if (process.platform === "win32") {
-    return { command: "cmd.exe", args: ["/d", "/s", "/c", command] };
-  }
-  return { command: "sh", args: ["-c", command] };
-}
-
 function probeEnvironment(
   tool: EnvironmentToolId,
 ): Promise<{ installed: boolean }> {
@@ -347,16 +300,6 @@ function environmentInstallCommand(tool: EnvironmentToolId): string {
     return `winget install --id OpenJS.NodeJS.LTS -e ${quiet}`;
   }
   return `winget install --id Microsoft.PowerShell -e ${quiet}`;
-}
-
-function runCommand(cwd: string, command: string): Promise<string> {
-  const launch = shellLaunch(command);
-  return collectOutput(launch.command, launch.args, cwd).then((result) => {
-    if (result.spawnError) {
-      throw new Error("command failed");
-    }
-    return result.output;
-  });
 }
 
 function writeClipboard(text: string): Promise<void> {
@@ -414,35 +357,6 @@ function readBody(req: http.IncomingMessage, max = 16_384): Promise<string> {
       );
     });
     req.on("error", reject);
-  });
-}
-
-function pickProjectFolder(): Promise<string | undefined> {
-  if (process.platform !== "win32") return Promise.resolve(undefined);
-  const command = [
-    "Add-Type -AssemblyName System.Windows.Forms",
-    "$owner = New-Object System.Windows.Forms.Form",
-    "$owner.TopMost = $true",
-    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "$dialog.Description = '選擇專案資料夾'",
-    "$dialog.ShowNewFolderButton = $true",
-    "if ($dialog.ShowDialog($owner) -eq 'OK') { $dialog.SelectedPath }",
-    "$owner.Dispose()",
-  ].join("; ");
-  return new Promise((resolve) => {
-    execFile(
-      "powershell.exe",
-      ["-NoProfile", "-STA", "-Command", command],
-      { timeout: 120_000 },
-      (error, stdout) => {
-        if (error) {
-          resolve(undefined);
-          return;
-        }
-        const picked = stdout.replaceAll("\r", "").trim();
-        resolve(picked || undefined);
-      },
-    );
   });
 }
 
@@ -692,6 +606,15 @@ async function main(): Promise<void> {
       redirect(res);
     };
     try {
+      if (req.method === "GET" && pathname === "/command-status") {
+        const view = app.view();
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(JSON.stringify({ running: view.commandRunning, output: view.commandOutput ?? "" }));
+        return;
+      }
       if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
         const variant = parsed.searchParams.get("variant") ?? "";
         const html =
@@ -750,6 +673,12 @@ async function main(): Promise<void> {
       if (req.method === "POST" && pathname === "/confirm") {
         const params = new URLSearchParams(await readBody(req));
         await app.confirm();
+        if (req.headers["x-classroom-progress"] === "1") {
+          const view = app.view();
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ succeeded: view.commandSucceeded, output: view.commandOutput ?? "" }));
+          return;
+        }
         goHome(params);
         return;
       }
