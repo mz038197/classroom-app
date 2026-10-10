@@ -1,22 +1,16 @@
-// PROTOTYPE — throwaway.
-// Four variants of the classroom install page, switchable via ?variant=, on the existing / route.
-// A–C use the opencodex console grammar. D is the current production layout.
-// Default render without ?variant= stays the production page.
-import { createRequire } from "node:module";
+// PROTOTYPE — throwaway. A–C only, switchable via ?variant= when not in production.
 import type { ClassroomAppView } from "./classroomApp";
-import { classroomBlocks, renderPage } from "./page";
+import { classroomBlocks } from "./page";
 
 const PRODUCT = "凡思課堂安裝";
-const VERSION = `v${createRequire(__filename)("../package.json").version as string}`;
 
-export const PROTOTYPE_VARIANTS = ["A", "B", "C", "D"] as const;
+export const PROTOTYPE_VARIANTS = ["A", "B", "C"] as const;
 export type PrototypeVariant = (typeof PROTOTYPE_VARIANTS)[number];
 
 const VARIANT_NAME: Record<PrototypeVariant, string> = {
   A: "側欄控制台",
   B: "設定清單",
   C: "工作區",
-  D: "原本",
 };
 
 const SECTIONS = [
@@ -32,7 +26,8 @@ export function isPrototypeVariant(value: string): value is PrototypeVariant {
   return (PROTOTYPE_VARIANTS as readonly string[]).includes(value);
 }
 
-function stamp(html: string, variant: PrototypeVariant): string {
+function stamp(html: string, variant?: PrototypeVariant): string {
+  if (!variant) return html;
   return html.replaceAll(
     /<form\b([^>]*)>/g,
     `<form$1><input type="hidden" name="prototype_variant" value="${variant}">`,
@@ -497,251 +492,7 @@ function clientScript(variant: PrototypeVariant): string {
   `;
 }
 
-const COPY_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-
-function escapeText(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function splitCourseCards(html: string): string {
-  const commandMatch = html.match(
-    /<section class="tile wide"><h2>指令<\/h2>([\s\S]*?)<\/section>/,
-  );
-  const courseMatch = html.match(
-    /<section class="tile wide"><h2>課程<\/h2>([\s\S]*?)<\/section>/,
-  );
-  if (!commandMatch || !courseMatch) return html;
-  const commandBody = commandMatch[1].includes("沒有待確認的指令。")
-    ? ""
-    : commandMatch[1];
-  const snippetHeading = "<h3>本課片段</h3>";
-  const snippetAt = courseMatch[1].indexOf(snippetHeading);
-  const courseBody =
-    snippetAt === -1 ? courseMatch[1] : courseMatch[1].slice(0, snippetAt);
-  const snippetBody =
-    snippetAt === -1
-      ? `<p class="empty">這堂課沒有片段。</p>`
-      : courseMatch[1].slice(snippetAt + snippetHeading.length);
-  const install = `<section class="tile wide"><div class="tile-head"><h2>課程安裝</h2></div>${courseBody}${commandBody}</section>`;
-  const snippets = `<section class="tile wide"><div class="tile-head"><h2>課程片段</h2></div>${snippetBody}</section>`;
-  return html.replace(commandMatch[0], install).replace(courseMatch[0], snippets);
-}
-
-function originalPage(view: ClassroomAppView, variant: PrototypeVariant): string {
-  const tag = view.connected
-    ? `<span class="badge">已連線</span>`
-    : `<span class="badge off">未連線</span>`;
-  let html = stamp(renderPage(view), variant).replace(
-    `<section class="tile"><h2>連線</h2>`,
-    `<section class="tile"><div class="tile-head"><h2>連線</h2>${tag}</div>`,
-  );
-  html = html.replace(
-    `<header class="bar">`,
-    `<div class="mobile-top"><button type="button" class="menu-toggle" aria-label="開啟選單" aria-expanded="false" aria-controls="side-menu"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="brand"><div class="logo-badge"><img src="/brand-logo.png" alt=""></div><h1 class="gradient-text">凡思課堂安裝</h1></div></div><button type="button" class="drawer-scrim" aria-label="關閉選單"></button><header class="bar" id="side-menu">`,
-  );
-  html = html.replace(
-    `<button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
-    `<nav aria-label="選單"><button type="button" class="side-item" aria-current="page">教室設定</button></nav><button type="button" data-appearance-toggle aria-label="切換外觀"></button>`,
-  );
-  const folderTag = view.projectFolder
-    ? `<span class="badge">已設定</span>`
-    : `<span class="badge off">未設定</span>`;
-  const folderOff = view.commandRunning ? " disabled" : "";
-  const folderInput = view.projectFolder
-    ? ` value="${escapeText(view.projectFolder)}"`
-    : "";
-  const folderError = view.folderError
-    ? `<p class="error">${escapeText(view.folderError)}</p>`
-    : "";
-  html = html.replace(
-    `<section class="tile"><h2>資料夾</h2>`,
-    `<section class="tile"><div class="tile-head"><h2>資料夾</h2>${folderTag}</div>`,
-  );
-  html = html.replace(
-    /<form class="stack" method="post" action="\/project-folder">[\s\S]*?<\/form>/,
-    `<form class="stack" method="post" action="/project-folder"><input type="hidden" name="prototype_variant" value="${variant}"><label>專案資料夾 <input name="project_folder" autocomplete="off" placeholder="還沒選擇"${folderInput}${folderOff}></label>${folderError}</form><form method="post" action="/pick-folder"><input type="hidden" name="prototype_variant" value="${variant}"><button type="submit"${folderOff}>設定</button></form>`,
-  );
-  const modelTag =
-    view.mode === "classroom"
-      ? `<span class="badge">課堂</span>`
-      : `<span class="badge off">個人</span>`;
-  const modelValue =
-    view.mode === "classroom"
-      ? escapeText(view.modelId || "尚未載入")
-      : "使用自己的帳號";
-  html = html.replace(
-    `<section class="tile"><h2>模型</h2>`,
-    `<section class="tile"><div class="tile-head"><h2>模型</h2>${modelTag}</div>`,
-  );
-  html = html.replace(
-    /<p class="mode-line">[\s\S]*?<\/p>/,
-    `<label>目前模型 <div class="model-value">${modelValue}</div></label>`,
-  );
-  html = html.replaceAll(">Classroom</button>", ">課堂</button>");
-  html = html.replaceAll(">Native</button>", ">個人</button>");
-  const envReady = view.tools.length > 0 && view.tools.every((tool) => tool.installed);
-  const envTag = envReady
-    ? `<span class="badge">已就緒</span>`
-    : `<span class="badge off">未完成</span>`;
-  html = html.replace(
-    `<section class="tile"><h2>環境</h2>`,
-    `<section class="tile"><div class="tile-head"><h2>環境</h2>${envTag}</div>`,
-  );
-  html = html.replaceAll(`<em>未安裝</em>`, `<em class="missing">未安裝</em>`);
-  if (!view.tools.some((tool) => tool.selected)) {
-    html = html.replace(
-      `<button type="submit" class="go">確認安裝</button>`,
-      `<button type="submit" class="go" disabled>確認安裝</button>`,
-    );
-  }
-  if (view.connected && view.canCopyKey) {
-    const off = view.commandRunning ? " disabled" : "";
-    const hidden = `<input type="hidden" name="prototype_variant" value="${variant}">`;
-    const welcome = view.nickname
-      ? `<p class="welcome">歡迎! ${escapeText(view.nickname)}</p>`
-      : "";
-    const course = view.courseTitle
-      ? `<p class="course-title">${escapeText(view.courseTitle)}</p>`
-      : "";
-    const session = view.sessionTitle
-      ? `<p class="session-sub">${escapeText(view.sessionTitle)}</p>`
-      : "";
-    const block = `${welcome}${course}${session}<div class="key-row"><p>API KEY 已設定</p><form method="post" action="/copy">${hidden}<button type="submit" class="copy-icon" aria-label="複製 Classroom API Key"${off}>${COPY_ICON}</button></form></div><form method="post" action="/clear">${hidden}<button type="submit" class="stop"${off}>清除連線</button></form>`;
-    html = html.replace(
-      /<form method="post" action="\/copy">[\s\S]*?<\/form>\s*<form method="post" action="\/clear">[\s\S]*?<\/form>/,
-      block,
-    );
-    html = html.replace(/<p class="class-label">[\s\S]*?<\/p>/, "");
-    html = html.replace(
-      `<p class="detail">Classroom API Key 已設定。</p>`,
-      "",
-    );
-  }
-  html = html.replaceAll(
-    `<h1 class="gradient-text">${PRODUCT}</h1>`,
-    `<h1 class="brand-title">VPod</h1><span class="ver">${VERSION}</span>`,
-  );
-  html = html.replace(
-    `<div class="modules">`,
-    `<header class="page-head"><h2>教室設定</h2><p>連線、資料夾、模型與環境。</p></header><div class="modules">`,
-  );
-  html = splitCourseCards(html);
-  const extra = `<style>
-    .proto-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 80; width: min(440px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 6px; align-items: center; }
-    .proto-state { width: 100%; max-height: 88px; overflow: auto; margin: 0; padding: 8px 10px; border-radius: 10px; background: #111; color: #f4f4f4; border: 2px solid #f5c518; font-size: 10px; line-height: 1.35; }
-    .proto-pill { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 999px; background: #111; color: #fff; border: 2px solid #f5c518; box-shadow: 0 8px 24px rgba(0,0,0,0.28); }
-    .proto-pill button { width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 999px; background: #f5c518; color: #111; font-weight: 700; align-self: auto; }
-    .proto-pill span { font-size: 13px; font-weight: 600; min-width: 9rem; text-align: center; }
-    .tile { border: 1px solid light-dark(#e6e6e6, #3d3d3d); }
-    .display { display: none; }
-    body { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100dvh; }
-    .bar { position: sticky; top: 0; align-self: start; height: 100dvh; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px; padding: 18px 14px; border-bottom: 0; border-right: 1px solid var(--line); }
-    .bar .brand { padding: 6px 8px 14px; }
-    .bar .logo-badge { width: 28px; height: 28px; }
-    .bar .brand-title, .mobile-top .brand-title { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0; line-height: 26px; color: light-dark(#0d0d0d, #ececec); background: none; -webkit-text-fill-color: currentColor; white-space: nowrap; }
-    .brand .ver { align-self: center; flex: 0 0 auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; line-height: 1.2; color: var(--muted); background: light-dark(#f4f4f4, #303030); border: 1px solid light-dark(#e6e6e6, #3d3d3d); padding: 2px 6px; border-radius: 999px; white-space: nowrap; }
-    .bar nav { display: flex; flex-direction: column; }
-    .side-item { align-self: stretch; justify-content: flex-start; min-height: 36px; padding: 8px 10px; border-radius: 8px; background: light-dark(rgba(13, 13, 13, 0.06), rgba(255, 255, 255, 0.09)); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; }
-    .bar [data-appearance-toggle] { margin-top: auto; align-self: flex-start; }
-    .mobile-top, .drawer-scrim, .menu-toggle { display: none; }
-    main { justify-self: center; width: min(52rem, 100%); }
-    @media (max-width: 760px) {
-      body { display: block; }
-      .mobile-top { display: flex; position: sticky; top: 0; z-index: 20; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--bar); backdrop-filter: blur(24px) saturate(160%); }
-      .mobile-top .brand { flex: 1; min-width: 0; padding: 4px; }
-      .mobile-top .brand-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-      .menu-toggle { display: grid; place-items: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text); }
-      .menu-toggle svg { width: 20px; height: 20px; }
-      .bar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; width: min(280px, 84vw); height: 100dvh; transform: translateX(-100%); visibility: hidden; border-right: 1px solid var(--line); background: light-dark(rgba(242, 242, 247, 0.97), rgba(12, 12, 14, 0.96)); }
-      .bar.open { transform: translateX(0); visibility: visible; }
-      .bar .brand { display: none; }
-      .drawer-scrim.show { display: block; position: fixed; inset: 0; z-index: 30; border: 0; padding: 0; background: light-dark(rgba(20, 20, 20, 0.32), rgba(0, 0, 0, 0.52)); }
-      main { width: min(52rem, 100%); margin: 0 auto; }
-    }
-    .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border-radius: 999px; background: light-dark(rgba(16, 163, 127, 0.10), rgba(78, 203, 157, 0.13)); color: light-dark(#0a7d5c, #4ecb9d); font-size: 12px; font-weight: 600; }
-    .badge.off { background: light-dark(#f4f4f4, #303030); color: light-dark(#6e6e6e, #a6a6a6); }
-    .welcome { font-size: 1.15rem; font-weight: 700; }
-    .course-title { font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
-    .model-value { min-height: 2.75rem; border-radius: 10px; background: var(--input); padding: 0.55rem 0.8rem; display: flex; align-items: center; overflow-wrap: anywhere; }
-    .tool em { color: var(--text); }
-    .tool em.missing { color: var(--muted); }
-    .restart { color: light-dark(#9a4a08, #fbbf24); }
-    [data-appearance="dark"] { --bg: #212121; }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-appearance="light"]) { --bg: #212121; }
-    }
-    form[action="/pick-folder"] { margin-top: auto; }
-    form[action="/reload"] { margin-top: auto; }
-    form[action="/environment"] { flex: 1; }
-    form[action="/environment"] > button { margin-top: auto; }
-    .session-sub { color: var(--muted); font-size: 0.85rem; }
-    .key-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .copy-icon { width: 2.75rem; min-height: 2.75rem; padding: 0; display: grid; place-items: center; }
-    .page-head { margin: 0.75rem 0 0.15rem; }
-    .page-head h2 { font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: 0; }
-    .page-head p { margin-top: 4px; color: var(--muted); font-size: 14px; font-weight: 400; }
-    main button { min-height: 34px; padding: 8px 16px; border-radius: 999px; border: 1px solid transparent; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 500; }
-    main button.quiet { background: light-dark(#ffffff, #212121); color: light-dark(#0d0d0d, #ececec); border-color: light-dark(#e6e6e6, #3d3d3d); padding: 8px 16px; }
-    main button.stop { background: transparent; color: light-dark(#b91c1c, #f87171); border-color: light-dark(rgba(185, 28, 28, 0.35), rgba(248, 113, 113, 0.35)); }
-    main .modes { border-radius: 999px; padding: 2px; background: light-dark(#f4f4f4, #303030); border: 1px solid light-dark(#e6e6e6, #3d3d3d); }
-    main .modes button { background: transparent; color: var(--text); border-color: transparent; }
-    main .modes button.on { background: var(--accent); color: var(--on-accent); }
-    main button.copy-icon { width: 34px; min-height: 34px; padding: 0; }
-    .copy-icon svg { width: 1.15rem; height: 1.15rem; }
-  </style>
-  ${switcher(variant, stateText(view))}
-  <script>${switcherScript(variant)}</script>`;
-  return html.replace("</body>", `${extra}</body>`);
-}
-
-function switcherScript(variant: PrototypeVariant): string {
-  return `
-    document.addEventListener("click", function (event) {
-      var target = event.target;
-      if (!target || !target.closest) return;
-      var jump = target.closest("[data-proto-go]");
-      if (jump) {
-        var url = new URL(location.href);
-        url.searchParams.set("variant", jump.getAttribute("data-proto-go"));
-        location.assign(url.pathname + url.search);
-        return;
-      }
-      var bar = document.getElementById("side-menu");
-      var scrim = document.querySelector(".drawer-scrim");
-      var toggle = document.querySelector(".menu-toggle");
-      if (!bar || !scrim || !toggle) return;
-      function setOpen(open) {
-        bar.classList.toggle("open", open);
-        scrim.classList.toggle("show", open);
-        toggle.setAttribute("aria-expanded", open ? "true" : "false");
-        toggle.setAttribute("aria-label", open ? "關閉選單" : "開啟選單");
-      }
-      if (target.closest(".menu-toggle")) setOpen(!bar.classList.contains("open"));
-      if (target.closest(".drawer-scrim") || target.closest(".side-item")) setOpen(false);
-    });
-    window.addEventListener("keydown", function (event) {
-      var tag = event.target && event.target.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || (event.target && event.target.isContentEditable)) return;
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      var order = ${JSON.stringify(PROTOTYPE_VARIANTS)};
-      var current = ${JSON.stringify(variant)};
-      var index = order.indexOf(current);
-      var step = event.key === "ArrowRight" ? 1 : -1;
-      var next = order[(index + step + order.length) % order.length];
-      var url = new URL(location.href);
-      url.searchParams.set("variant", next);
-      location.assign(url.pathname + url.search);
-    });
-  `;
-}
-
 export function renderPrototypePage(view: ClassroomAppView, variant: PrototypeVariant): string {
-  if (variant === "D") return originalPage(view, variant);
   const blocks = classroomBlocks(view);
   const body =
     variant === "A"
